@@ -1,11 +1,18 @@
 from langchain.chat_models import init_chat_model
-from tenacity import retry, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.rag_simple.config import CHAT_MODEL
 
 wait = wait_exponential(multiplier=1, min=10, max=240)
 
-model = init_chat_model(CHAT_MODEL, temperature=0)
+
+def _log_retry(retry_state):
+    print(
+        f"[retry] {retry_state.fn.__name__} attempt {retry_state.attempt_number} failed: "
+        f"{retry_state.outcome.exception()!r} — retrying..."
+    )
+
+model = init_chat_model(CHAT_MODEL, temperature=0).with_config({"tags": ["nostream"]})
 
 REWRITE_PROMPT = """You are in a conversation with a user.
 You are about to look up information in a Knowledge Base to answer the user's question.
@@ -25,7 +32,7 @@ If there is no history, or the question is already self-contained, just return t
 IMPORTANT: Respond ONLY with the precise knowledge-base query, nothing else."""
 
 
-@retry(wait=wait)
+@retry(wait=wait, stop=stop_after_attempt(3), before_sleep=_log_retry, reraise=True)
 def rewrite_query(question: str, history: list[dict] | None = None) -> str:
     """Condense the question + conversation history into a standalone search query."""
     history = history or []

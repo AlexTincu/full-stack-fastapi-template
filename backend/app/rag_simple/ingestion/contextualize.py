@@ -1,12 +1,19 @@
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
-from tenacity import retry, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential
 from tqdm import tqdm
 
 from app.rag_simple.config import CHAT_MODEL
 from app.rag_simple.ingestion.load import SourceDocument
 
 wait = wait_exponential(multiplier=1, min=10, max=240)
+
+
+def _log_retry(retry_state):
+    print(
+        f"[retry] {retry_state.fn.__name__} attempt {retry_state.attempt_number} failed: "
+        f"{retry_state.outcome.exception()!r} — retrying..."
+    )
 
 CONTEXT_PROMPT = """
 Here is the full text of a document:
@@ -26,7 +33,7 @@ and nothing else."""
 model = init_chat_model(CHAT_MODEL, temperature=0)
 
 
-@retry(wait=wait)
+@retry(wait=wait, stop=stop_after_attempt(5), before_sleep=_log_retry, reraise=True)
 def _generate_context(document_text: str, chunk_text: str) -> str:
     prompt = CONTEXT_PROMPT.format(document=document_text, chunk=chunk_text)
     response = model.invoke(prompt)

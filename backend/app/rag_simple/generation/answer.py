@@ -1,17 +1,23 @@
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
-from tenacity import retry, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.rag_simple.config import CHAT_MODEL
 from app.rag_simple.retrieval.pipeline import retrieve
 
 wait = wait_exponential(multiplier=1, min=10, max=240)
 
+
+def _log_retry(retry_state):
+    print(
+        f"[retry] {retry_state.fn.__name__} attempt {retry_state.attempt_number} failed: "
+        f"{retry_state.outcome.exception()!r} — retrying..."
+    )
+
 model = init_chat_model(CHAT_MODEL, temperature=0)
 
-SYSTEM_PROMPT = """Ești un asistent cunoscător, care răspunde la întrebări despre macrobiotică, \
-sănătate naturistă și spiritualitate, pe baza unei baze de cunoștințe curatoriate (seminarii \
-Michio Kushi și alte materiale despre macrobiotică).
+SYSTEM_PROMPT = """Ești un asistent cunoscător care răspunde la întrebări despre macrobiotică, \
+sănătate naturistă și spiritualitate, pe baza unei baze de cunoștințe curatoriate (materiale despre macrobiotică).
 
 Răspunsul tău va fi evaluat pentru acuratețe, relevanță și completitudine, deci răspunde doar la \
 întrebare și răspunde-i complet. Dacă informația nu se regăsește în contextul de mai jos, spune \
@@ -38,7 +44,7 @@ def make_messages(question: str, history: list[dict], chunks: list[Document]) ->
     )
 
 
-@retry(wait=wait)
+@retry(wait=wait, stop=stop_after_attempt(5), before_sleep=_log_retry, reraise=True)
 def answer_question(question: str, history: list[dict] | None = None) -> tuple[str, list[Document]]:
     """Answer a question using RAG. Returns (answer, retrieved chunks)."""
     history = history or []

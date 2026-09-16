@@ -1,11 +1,18 @@
 from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
 from pydantic import BaseModel, Field
-from tenacity import retry, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.rag_simple.config import CHAT_MODEL
 
 wait = wait_exponential(multiplier=1, min=10, max=240)
+
+
+def _log_retry(retry_state):
+    print(
+        f"[retry] {retry_state.fn.__name__} attempt {retry_state.attempt_number} failed: "
+        f"{retry_state.outcome.exception()!r} — retrying..."
+    )
 
 model = init_chat_model(CHAT_MODEL, temperature=0)
 
@@ -22,7 +29,7 @@ class RankOrder(BaseModel):
     )
 
 
-@retry(wait=wait)
+@retry(wait=wait, stop=stop_after_attempt(5), before_sleep=_log_retry, reraise=True)
 def rerank(question: str, chunks: list[Document]) -> list[Document]:
     if not chunks:
         return []
@@ -32,7 +39,7 @@ def rerank(question: str, chunks: list[Document]) -> list[Document]:
         user_prompt += f"# CHUNK ID: {index + 1}\n\n{chunk.page_content}\n\n"
     user_prompt += "Reply only with the ranked list of chunk ids, most relevant first."
 
-    structured_model = model.with_structured_output(RankOrder)
+    structured_model = model.with_structured_output(RankOrder).with_config({"tags": ["nostream"]})
     result = structured_model.invoke(
         [
             {"role": "system", "content": RERANK_SYSTEM_PROMPT},
