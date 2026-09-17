@@ -13,10 +13,11 @@ logger = logging.getLogger(__name__)
 HEADERS_TO_SPLIT_ON = [
     ("###", "h3"),
     ("####", "h4"),
+    ("#####", "h5"),
 ]
 
-CHUNK_SIZE_TOKENS = 500
-CHUNK_OVERLAP_TOKENS = 75
+CHUNK_SIZE_TOKENS = 1000
+CHUNK_OVERLAP_TOKENS = 175
 
 header_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=HEADERS_TO_SPLIT_ON, strip_headers=False)
 size_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(

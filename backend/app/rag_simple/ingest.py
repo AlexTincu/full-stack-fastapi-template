@@ -11,6 +11,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     documents = load_documents()
     chunks = split_documents(documents)
-    contextualized_chunks = add_context(chunks, documents)
-    build_vectorstore(contextualized_chunks)
+    # chunks = add_context(chunks, documents)
+    build_vectorstore(chunks)
     logger.info("Ingestion complete")

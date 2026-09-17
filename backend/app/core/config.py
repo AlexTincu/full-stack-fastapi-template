@@ -15,8 +15,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        # Use top level .env file (one level above ./backend/)
-        env_file="../.env",
+        # Top level .env file (one level above ./backend/). Anchored to this
+        # file's location (not cwd) so it resolves correctly regardless of
+        # where the process is launched from (uv run, pytest, notebooks, ...).
+        env_file=Path(__file__).resolve().parents[3] / ".env",
         env_ignore_empty=True,
         extra="ignore",
     )

@@ -28,7 +28,7 @@ Here is a chunk we want to situate within the whole document:
 
 Give a short, succinct context (1-2 sentences) to situate this chunk within the overall document, \
 for the purposes of improving search retrieval of the chunk. Answer only with the succinct context \
-and nothing else."""
+and nothing else. Answer only in the same language as the document."""
 
 model = init_chat_model(CHAT_MODEL, temperature=0)
 
