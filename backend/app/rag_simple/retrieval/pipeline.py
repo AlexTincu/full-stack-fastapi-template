@@ -29,14 +29,18 @@ class RetrievalTrace:
 def retrieve_with_trace(question: str, history: list[dict] | None = None) -> RetrievalTrace:
     rewritten = rewrite_query(question, history)
 
+    # print(f"[retrieve] question: {question!r} -> rewritten: {rewritten!r}")
     # Query rewrite + hybrid search: search both the original and rewritten
     # query on each index, fusing each pair, then fuse semantic with lexical.
+    # semantic_hits = []
+    # lexical_hits = []
     semantic_hits = reciprocal_rank_fusion(
         [semantic_search(question, RETRIEVAL_K), semantic_search(rewritten, RETRIEVAL_K)]
     )
     lexical_hits = reciprocal_rank_fusion(
         [lexical_search(question, RETRIEVAL_K), lexical_search(rewritten, RETRIEVAL_K)]
     )
+    # print(f"[retrieve] semantic_hits: {len(semantic_hits)}, lexical_hits: {len(lexical_hits)}")
     fused = reciprocal_rank_fusion([semantic_hits, lexical_hits])
     reranked = rerank(question, fused)
 

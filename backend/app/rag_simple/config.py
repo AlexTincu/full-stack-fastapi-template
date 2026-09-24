@@ -18,6 +18,8 @@ EMBEDDING_MODEL = "openai:text-embedding-3-large"
 EMBEDDING_DIMENSIONS = 3072  # must match EMBEDDING_MODEL's output size
 
 KNOWLEDGE_DIR = settings.KNOWLEDGE_DIR
+# Files are moved here after a successful ingest, so each run only picks up new ones.
+INGESTED_DIR = KNOWLEDGE_DIR.parent / "ingested"
 DB_DIR = ROOT / "db"
 CHUNKS_PATH = DB_DIR / "chunks.json"
 

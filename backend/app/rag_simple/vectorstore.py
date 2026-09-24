@@ -2,6 +2,7 @@ from functools import lru_cache
 
 from langchain.embeddings import init_embeddings
 from langchain_postgres import PGEngine, PGVectorStore
+from sqlalchemy import create_engine, inspect
 
 from app.rag_simple.config import (
     EMBEDDING_DIMENSIONS,
@@ -38,3 +39,22 @@ def rebuild_table() -> None:
         overwrite_existing=True,
     )
     get_vectorstore.cache_clear()
+
+
+def ensure_table() -> None:
+    """Create the vectorstore table only if it doesn't exist yet (incremental ingest).
+
+    `init_vectorstore_table` issues a plain CREATE TABLE, so it can't be called
+    unconditionally once the table holds data.
+    """
+    sync_engine = create_engine(PGVECTOR_CONNECTION)
+    try:
+        exists = inspect(sync_engine).has_table(PGVECTOR_TABLE_NAME)
+    finally:
+        sync_engine.dispose()
+    if not exists:
+        get_engine().init_vectorstore_table(
+            table_name=PGVECTOR_TABLE_NAME,
+            vector_size=EMBEDDING_DIMENSIONS,
+        )
+        get_vectorstore.cache_clear()

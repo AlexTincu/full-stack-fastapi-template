@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     DATABASE_URL: PostgresDsn
     OPENAI_API_KEY: str
     KNOWLEDGE_DIR: Path
+    # Rădăcina knowledge/ pentru app.knowledge_prep: conține files/ (surse brute) și converted/ (.md)
+    KNOWLEDGE_ROOT: Path
+    # Gemini pentru app.knowledge_prep (conversie PDF/audio → markdown)
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

@@ -29,6 +29,8 @@ dependencies = [
     "gradio>=5.47.2,<6.0",
     "litellm>=1.101.0",
     "langchain-postgres>=0.0.18",
+    "google-genai>=2.8.0",
+    "pypdf>=6.19.0",
 ]
 
 [dependency-groups]
