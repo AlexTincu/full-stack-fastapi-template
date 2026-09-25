@@ -4,7 +4,7 @@ Textul extras cu pypdf nu ajunge în `.md`, dar are două roluri:
 - unește cuvintele despărțite la capăt de rând, pe care Gemini fără thinking le copiază (`pen-tru`);
 - verifică fiecare bucată: dacă din output lipsește text, bucata se reîncearcă o dată, apoi se marchează.
 
-Bucățile gata se păstrează în `<knowledge>/.cache/pdf/<nume>/`, ca o rulare întreruptă să nu plătească din nou.
+Bucățile gata se păstrează în `converted/.cache/<nume>/` (lângă PDF), ca o rulare întreruptă să nu plătească din nou.
 """
 
 import io
@@ -19,6 +19,7 @@ from google import genai
 from google.genai import types
 from pypdf import PdfReader, PdfWriter
 
+from app.knowledge_prep.converters.diacritics import normalize
 from app.knowledge_prep.converters.gemini import client_and_model, generate
 
 logger = logging.getLogger(__name__)
@@ -39,11 +40,8 @@ MIN_PAGE_CHARS = 50
 MAX_MISSING = 0.01
 _SHINGLE = 8
 
-# Sedilă → virgulă dedesubt; `Ġ` e cum iese `ț` din fonturile cu encoding nestandard (ex. Treben).
-_NORMALIZE = str.maketrans("şţŞŢĠġ", "șțȘȚțț")
-_PAGE_NUMBER_LINE = re.compile(
-    r"^\d{1,4}\n+", re.M
-)  # promptul le cere omise, dar uneori scapă
+# Numere de pagină rămase pe rând propriu: promptul le cere omise, dar uneori scapă.
+_PAGE_NUMBER_LINE = re.compile(r"^\d{1,4}\n+", re.M)
 _WORD = r"[^\W\d_]+"  # doar litere: intervalele `3-4` nu sunt despărțiri
 _LINE_END_BREAK = re.compile(rf"({_WORD})-[ \t]*\n\s*({_WORD})")
 _INLINE_HYPHEN = re.compile(rf"(?<!\w)({_WORD})-({_WORD})(?!\w)")
@@ -57,10 +55,6 @@ _CLITIC_AFTER = {
 
 class ScannedPdfError(ValueError):
     pass
-
-
-def normalize(text: str) -> str:
-    return text.translate(_NORMALIZE)
 
 
 def _key(before: str, after: str) -> tuple[str, str]:
@@ -176,8 +170,7 @@ def convert_pdf(
         )
 
     client, model = client_and_model(client, model)
-    # `path` e copia din `<knowledge>/files/`, deci cache-ul ajunge în `<knowledge>/.cache/`.
-    cache_dir = cache_dir or path.parent.parent / ".cache" / "pdf" / path.stem
+    cache_dir = cache_dir or path.parent / "converted" / ".cache" / path.stem
     context = "\n".join(texts)
     parts = []
     for start in range(0, len(texts), PAGES_PER_CHUNK):
@@ -207,7 +200,6 @@ def convert_pdf(
         parts.append(md)
 
     shutil.rmtree(cache_dir, ignore_errors=True)
-    for parent in (cache_dir.parent, cache_dir.parent.parent):  # .cache/pdf, .cache
-        if parent.is_dir() and not any(parent.iterdir()):
-            parent.rmdir()
+    if cache_dir.parent.is_dir() and not any(cache_dir.parent.iterdir()):
+        cache_dir.parent.rmdir()  # .cache/ gol
     return "\n\n".join(p.strip() for p in parts) + "\n"

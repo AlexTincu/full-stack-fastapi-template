@@ -19,7 +19,9 @@ class FrontMatter:
     slug: str
     type: DocType
     author: str | None
-    source_file: str  # relativ la rădăcina knowledge/, ex. "files/carte.pdf"
+    source_file: (
+        str  # numele sursei, din folderul care conține `converted/`, ex. "carte.pdf"
+    )
     status: Status = "draft"
 
 

@@ -1,17 +1,15 @@
-"""CLI + funcția `convert(...)`: sursă brută → `files/` (copie) → `converted/<slug>.md` cu `status: draft`.
+"""CLI + funcția `convert(...)`: `<folder>/<sursă>` → `<folder>/converted/<slug>.md` cu `status: draft`.
 
 Rulare din backend/:
     uv run python -m app.knowledge_prep.convert "<fișier sau folder>" [--type carte] [--title ...] [--author ...] [--force]
 
 Reguli (docs/taskuri.md, deciziile 2, 8, 10):
-- `files/` păstrează copia neatinsă a sursei; `source_file` din front-matter trimite la ea.
+- Sursa nu se copiază și nu se modifică; `source_file` din front-matter e numele ei, din folderul care conține `converted/`.
 - Un `.md` existent nu se suprascrie fără `--force`; unul `reviewed` nu se suprascrie niciodată.
 """
 
 import argparse
-import filecmp
 import logging
-import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -39,6 +37,9 @@ DOC_TYPES: tuple[DocType, ...] = (
 )
 
 
+CONVERTED_DIR = "converted"
+
+
 class ConversionError(Exception):
     pass
 
@@ -46,7 +47,6 @@ class ConversionError(Exception):
 def convert(
     source: Path,
     *,
-    root: Path,
     converters: Mapping[str, Converter] = CONVERTERS,
     doc_type: DocType | None = None,
     title: str | None = None,
@@ -62,10 +62,8 @@ def convert(
 
     title = title or title_from_filename(source.stem)
     slug = slugify(title)
-    files_dir, converted_dir = root / "files", root / "converted"
-    stored = files_dir / source.name
-    source_file = stored.relative_to(root).as_posix()
-    dest = converted_dir / f"{slug}.md"
+    source_file = source.name
+    dest = source.parent / CONVERTED_DIR / f"{slug}.md"
 
     if dest.exists():
         existing, _ = parse(dest.read_text(encoding="utf-8"))
@@ -80,13 +78,7 @@ def convert(
         if not force:
             return None
 
-    if source.resolve() != stored.resolve():
-        if stored.exists() and not filecmp.cmp(source, stored, shallow=False):
-            raise ConversionError(f"Există deja alt fișier cu numele {source_file}.")
-        files_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, stored)
-
-    body = converter(stored)
+    body = converter(source)
     fm = FrontMatter(
         title=title,
         slug=slug,
@@ -95,7 +87,7 @@ def convert(
         author=author,
         source_file=source_file,
     )
-    converted_dir.mkdir(parents=True, exist_ok=True)
+    dest.parent.mkdir(exist_ok=True)
     dest.write_text(render(fm, body), encoding="utf-8")
     return dest
 
@@ -120,11 +112,6 @@ def main(
     p.add_argument(
         "--force", action="store_true", help="suprascrie .md-urile draft existente"
     )
-    p.add_argument(
-        "--root",
-        type=Path,
-        help="folderul knowledge/ (implicit KNOWLEDGE_ROOT din .env)",
-    )
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     for noisy in ("httpx", "google_genai"):  # log-uri per request HTTP
@@ -134,16 +121,14 @@ def main(
         p.error(f"nu există: {args.path}")
     if args.path.is_dir() and args.title:
         p.error("--title se poate folosi doar cu un singur fișier")
-    if args.root is None:
-        from app.core.config import settings
-
-        args.root = settings.KNOWLEDGE_ROOT
 
     if args.path.is_file():
         sources = [args.path]
     else:
         sources = []
         for f in sorted(x for x in args.path.rglob("*") if x.is_file()):
+            if CONVERTED_DIR in f.relative_to(args.path).parts[:-1]:
+                continue  # rezultatele (și cache-ul) conversiilor anterioare
             if f.suffix.lower() in converters:
                 sources.append(f)
             else:
@@ -154,7 +139,6 @@ def main(
         try:
             out = convert(
                 src,
-                root=args.root,
                 converters=converters,
                 doc_type=args.doc_type,
                 title=args.title,

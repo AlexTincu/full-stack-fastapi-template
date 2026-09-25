@@ -14,7 +14,6 @@ from app.knowledge_prep.converters.pdf import (
     hyphen_breaks,
     join_hyphenated,
     missing_fraction,
-    normalize,
 )
 from app.knowledge_prep.tests.pdf_factory import make_pdf
 
@@ -54,10 +53,6 @@ def run(path: Path, client: FakeClient) -> str:
 
 
 # --- funcții pure -----------------------------------------------------------
-
-
-def test_normalize_uses_comma_below_and_fixes_broken_t_glyph():
-    assert normalize("şi ţară sănătăĠii ŞŢ") == "și țară sănătății ȘȚ"
 
 
 def test_missing_fraction_ignores_spurious_spaces_and_layout():
@@ -188,7 +183,7 @@ def test_convert_pdf_falls_back_to_pdf_text_when_gemini_returns_nothing(
 
 def test_convert_pdf_reuses_cached_chunks_and_cleans_cache(tmp_path: Path):
     path = write_pdf(tmp_path, [[f"{LINE} {i}"] for i in range(10)])
-    cache = tmp_path / ".cache" / "pdf" / "carte"
+    cache = tmp_path / "files" / "converted" / ".cache" / "carte"
     cache.mkdir(parents=True)
     (cache / "p0001-0008.md").write_text("din cache\n")
     client = FakeClient([f"{LINE} 8\n{LINE} 9"])
@@ -197,7 +192,7 @@ def test_convert_pdf_reuses_cached_chunks_and_cleans_cache(tmp_path: Path):
 
     assert md.startswith("din cache\n\n")
     assert client.sent_page_counts() == [2]
-    assert not (tmp_path / ".cache").exists()
+    assert not (tmp_path / "files" / "converted" / ".cache").exists()
 
 
 def test_convert_pdf_keeps_finished_chunks_in_cache_when_interrupted(tmp_path: Path):
@@ -208,7 +203,8 @@ def test_convert_pdf_keeps_finished_chunks_in_cache_when_interrupted(tmp_path: P
     with pytest.raises(IndexError):
         run(path, client)
 
-    assert (tmp_path / ".cache" / "pdf" / "carte" / "p0001-0008.md").exists()
+    cache = tmp_path / "files" / "converted" / ".cache" / "carte"
+    assert (cache / "p0001-0008.md").exists()
 
 
 def test_pdf_is_registered():
