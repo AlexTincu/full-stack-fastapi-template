@@ -20,6 +20,7 @@ fileConfig(config.config_file_name)
 # target_metadata = None
 
 from app.models import SQLModel  # noqa
+import app.knowledge_prep.models  # noqa: F401  (tabelele registrului în SQLModel.metadata)
 from app.core.config import settings # noqa
 
 target_metadata = SQLModel.metadata
