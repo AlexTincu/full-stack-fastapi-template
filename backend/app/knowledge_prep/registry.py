@@ -41,7 +41,10 @@ class AlreadyRegistered(RegistryError):
 
 def body_hash(path: Path) -> str:
     """sha256 pe corpul markdown-ului, fără front-matter."""
-    body = strip_frontmatter(path.read_text(encoding="utf-8"))
+    try:
+        body = strip_frontmatter(path.read_text(encoding="utf-8"))
+    except ValueError as e:  # front-matter stricat la editare în IDE
+        raise RegistryError(f"{path.name}: {e}")
     return hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -269,7 +272,10 @@ def hash_warnings(doc: Document) -> list[str]:
     md = Path(doc.markdown_path)
     if not md.is_file():
         return ["markdown lipsă"]
-    current = body_hash(md)
+    try:
+        current = body_hash(md)
+    except RegistryError as e:
+        return [str(e)]
     warnings = []
     if doc.reviewed_hash and current != doc.reviewed_hash:
         warnings.append("modificat după review")

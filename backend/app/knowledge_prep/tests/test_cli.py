@@ -158,3 +158,20 @@ def test_single_target_rule_violation_returns_1(
     assert run(session, "validate", "a") == 1
     assert "indexed" in caplog.text
     assert run(session, "review", "nu-exista") == 1
+
+
+def test_broken_frontmatter_is_reported_not_crashing(
+    session: Session,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+):
+    md = make_file(tmp_path, "converted/a.md", "---\ntitle: A\n---\n\ncorp\n")
+    run(session, "register", "--structured", str(md))
+    md.write_text("---\ntitle: A\ncorp stricat\n")  # al doilea '---' șters în IDE
+    capsys.readouterr()
+
+    assert run(session, "status") == 0
+    assert "neînchis" in capsys.readouterr().out
+    assert run(session, "review", "a") == 1
+    assert "neînchis" in caplog.text
