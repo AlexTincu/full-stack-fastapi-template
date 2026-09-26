@@ -4,7 +4,7 @@ import pytest
 from sqlmodel import Session
 
 from app.knowledge_prep import registry
-from app.knowledge_prep.frontmatter import FrontMatter, render
+from app.knowledge_prep.frontmatter import FrontMatter, render, split_frontmatter
 from app.knowledge_prep.models import Document, DocumentType, Stage
 from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
 
@@ -237,3 +237,74 @@ def test_record_step_saves_error_without_changing_stage_and_success_clears_it(
     with registry.record_step(session, doc):
         pass
     assert doc.last_error is None
+
+
+def test_prepare_writes_markdown_with_frontmatter_and_moves_to_structured(
+    session: Session, tmp_path: Path
+):
+    src = make_file(tmp_path, "regimuri/Regim DRI - Anemie.txt")
+    doc = reg(session, src, doc_type=DocumentType.regim, author="DRI")
+
+    out = registry.prepare(session, doc, converters=CONVERTERS)
+
+    assert out == src.parent.resolve() / "converted" / "regim-dri-anemie.md"
+    meta, body = split_frontmatter(out.read_text())
+    assert meta == {
+        "title": "Regim DRI - Anemie",
+        "slug": "regim-dri-anemie",
+        "type": "regim",
+        "author": "DRI",
+        "source_file": "Regim DRI - Anemie.txt",
+    }
+    assert body == "conținut din Regim DRI - Anemie.txt\n"
+    assert (doc.stage, doc.last_error) == (Stage.structured, None)
+    assert src.read_text() == "brut"
+
+
+def test_prepare_without_original_fails_clearly(session: Session, tmp_path: Path):
+    doc, _ = structured_doc(session, tmp_path)
+    assert doc.original_path is None
+    with pytest.raises(RegistryError, match="original"):
+        registry.prepare(session, doc, converters=CONVERTERS, force=True)
+
+
+def test_prepare_does_not_overwrite_existing_markdown_without_force(
+    session: Session, tmp_path: Path
+):
+    doc = reg(session, make_file(tmp_path, "a.txt"))
+    out = registry.prepare(session, doc, converters=CONVERTERS)
+    out.write_text(out.read_text() + "editat de om\n")
+
+    with pytest.raises(RegistryError, match="--force"):
+        registry.prepare(session, doc, converters=CONVERTERS)
+    assert out.read_text().endswith("editat de om\n")
+
+
+def test_prepare_force_on_reviewed_returns_to_structured(
+    session: Session, tmp_path: Path
+):
+    doc = reg(session, make_file(tmp_path, "a.txt"))
+    registry.prepare(session, doc, converters=CONVERTERS)
+    doc = registry.review(session, doc)
+    doc.indexed_hash = doc.reviewed_hash
+
+    with pytest.raises(RegistryError, match="--force"):
+        registry.prepare(session, doc, converters=CONVERTERS)
+    registry.prepare(session, doc, converters=CONVERTERS, force=True)
+
+    assert (doc.stage, doc.reviewed_hash) == (Stage.structured, None)
+    assert doc.indexed_hash is not None  # chunk-urile rămân până la următorul index
+
+
+def test_prepare_failure_records_error_and_keeps_stage(
+    session: Session, tmp_path: Path
+):
+    doc = reg(session, make_file(tmp_path, "a.txt"))
+
+    def broken(_p: Path) -> str:
+        raise RuntimeError("API căzut")
+
+    with pytest.raises(RuntimeError):
+        registry.prepare(session, doc, converters={".txt": broken})
+    assert (doc.stage, doc.last_error) == (Stage.uploaded, "RuntimeError: API căzut")
+    assert not Path(doc.markdown_path).exists()

@@ -14,10 +14,12 @@ from pathlib import Path
 
 from sqlmodel import Session, col, or_, select
 
-from app.knowledge_prep.convert import CONVERTED_DIR
+from app.knowledge_prep.convert import CONVERTED_DIR, convert
 from app.knowledge_prep.converters import CONVERTERS, Converter
 from app.knowledge_prep.converters.audio import AUDIO_EXTENSIONS
 from app.knowledge_prep.frontmatter import (
+    FrontMatter,
+    render,
     slugify,
     split_frontmatter,
     strip_frontmatter,
@@ -194,6 +196,45 @@ def record_step(session: Session, doc: Document) -> Iterator[None]:
     session.add(doc)
     session.commit()
     session.refresh(doc)
+
+
+def prepare(
+    session: Session,
+    doc: Document,
+    *,
+    force: bool = False,
+    converters: Mapping[str, Converter] = CONVERTERS,
+) -> Path:
+    """Original → `<folderul originalului>/converted/<slug>.md` → `structured`.
+
+    Un markdown existent (editat poate de om) sau un document `reviewed`+ se suprascrie
+    doar cu `force`; chunk-urile deja indexate rămân în DB până la următorul `index`.
+    """
+    if doc.original_path is None:
+        raise RegistryError(
+            f"{doc.slug} nu are original (a intrat direct ca markdown); nu are ce pregăti."
+        )
+    md = Path(doc.markdown_path)
+    if not force and (doc.stage.rank >= Stage.reviewed.rank or md.exists()):
+        raise RegistryError(
+            f"{doc.slug} e '{doc.stage}' și are deja {md.name}; "
+            "folosește --force ca să-l suprascrii."
+        )
+    original = Path(doc.original_path)
+    with record_step(session, doc):
+        body = convert(original, converters=converters)
+        fm = FrontMatter(
+            title=doc.title,
+            slug=doc.slug,
+            type=doc.type.value,
+            author=doc.author,
+            source_file=original.name,
+        )
+        md.parent.mkdir(exist_ok=True)
+        md.write_text(render(fm, body), encoding="utf-8")
+        doc.stage = Stage.structured
+        doc.reviewed_hash = None
+    return md
 
 
 def review(session: Session, doc: Document) -> Document:
