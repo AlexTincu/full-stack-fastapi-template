@@ -1,8 +1,13 @@
+from dataclasses import asdict
+
+import pytest
+
 from app.knowledge_prep.frontmatter import (
     FrontMatter,
-    parse,
     render,
     slugify,
+    split_frontmatter,
+    strip_frontmatter,
     title_from_filename,
 )
 
@@ -34,21 +39,43 @@ def test_title_from_filename_keeps_spaced_dash_as_separator():
     )
 
 
-def test_render_then_parse_roundtrips_metadata_and_body():
+def test_render_then_split_roundtrips_metadata_and_body():
     fm = FrontMatter(
         title="Rostul suferinței",
         slug="rostul-suferintei",
         type="transcriere",
         author=None,
-        source_file="files/rostul suferintei.ogg",
+        source_file="rostul suferintei.ogg",
     )
     body = "# Titlu\n\nText cu ș și ț.\n"
 
-    parsed_fm, parsed_body = parse(render(fm, body))
+    meta, parsed_body = split_frontmatter(render(fm, body))
 
-    assert parsed_fm == fm
-    assert parsed_fm.status == "draft"
+    assert meta == asdict(fm)
+    assert "status" not in meta
     assert parsed_body == body
+
+
+def test_split_frontmatter_without_frontmatter_returns_whole_text():
+    text = "<!-- bucata 020 -->\n\n## Nuci\n"
+    assert split_frontmatter(text) == ({}, text)
+
+
+def test_split_frontmatter_keeps_unknown_keys_like_legacy_status():
+    meta, body = split_frontmatter("---\ntitle: X\nstatus: reviewed\n---\n\ncorp\n")
+    assert meta == {"title": "X", "status": "reviewed"}
+    assert body == "corp\n"
+
+
+def test_split_frontmatter_rejects_unclosed_block():
+    with pytest.raises(ValueError, match="neînchis"):
+        split_frontmatter("---\ntitle: X\ncorp\n")
+
+
+def test_strip_frontmatter_ignores_metadata():
+    fm = FrontMatter(title="A", slug="a", type="carte", author=None)
+    assert strip_frontmatter(render(fm, "corp\n")) == "corp\n"
+    assert strip_frontmatter("fără front-matter\n") == "fără front-matter\n"
 
 
 def test_render_puts_frontmatter_block_first_and_keeps_diacritics_readable():

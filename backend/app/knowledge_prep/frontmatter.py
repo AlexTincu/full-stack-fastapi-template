@@ -1,14 +1,11 @@
-"""Front-matter-ul minimal al documentelor din `converted/` (decizia 2 din docs/taskuri.md)."""
+"""Front-matter-ul documentelor din `converted/`: doar pentru lizibilitate; stadiul stă în registru (spec 2026-09-25, decizia 2)."""
 
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import Any
 
 import yaml
-
-DocType = Literal["carte", "regim", "nota", "insight", "transcriere", "conversatie"]
-Status = Literal["draft", "reviewed"]
 
 _DELIMITER = "---\n"
 
@@ -17,12 +14,10 @@ _DELIMITER = "---\n"
 class FrontMatter:
     title: str
     slug: str
-    type: DocType
+    type: str
     author: str | None
-    source_file: (
-        str  # numele sursei, din folderul care conține `converted/`, ex. "carte.pdf"
-    )
-    status: Status = "draft"
+    # numele originalului, din folderul care conține `converted/`, ex. "carte.pdf"
+    source_file: str | None = None
 
 
 def slugify(text: str) -> str:
@@ -40,10 +35,18 @@ def render(fm: FrontMatter, body: str) -> str:
     return f"{_DELIMITER}{meta}{_DELIMITER}\n{body}"
 
 
-def parse(text: str) -> tuple[FrontMatter, str]:
+def split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """(metadate, corp). Fără front-matter: ({}, text). Cheile necunoscute (ex. vechiul `status`) rămân în dict."""
     if not text.startswith(_DELIMITER):
-        raise ValueError("Fișierul nu începe cu front-matter ('---').")
+        return {}, text
     meta, sep, body = text[len(_DELIMITER) :].partition(_DELIMITER)
     if not sep:
         raise ValueError("Front-matter neînchis (lipsește al doilea '---').")
-    return FrontMatter(**yaml.safe_load(meta)), body.removeprefix("\n")
+    data = yaml.safe_load(meta) or {}
+    if not isinstance(data, dict):
+        raise ValueError("Front-matter-ul nu e un mapping YAML.")
+    return data, body.removeprefix("\n")
+
+
+def strip_frontmatter(text: str) -> str:
+    return split_frontmatter(text)[1]
