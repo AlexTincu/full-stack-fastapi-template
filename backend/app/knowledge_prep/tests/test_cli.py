@@ -9,6 +9,7 @@ from app.knowledge_prep.__main__ import main
 from app.knowledge_prep.converters import Converter
 from app.knowledge_prep.models import Document, Stage
 from app.knowledge_prep.tests.index_fakes import FakeQuestions, FakeVectors
+from app.knowledge_prep.vectors import PgVectorIndex
 
 MID = " ".join(["Grâul încolțit dă putere organismului slăbit."] * 10)
 
@@ -241,6 +242,43 @@ def test_index_flow_no_questions_then_force_after_validate(
         "carte",
         "indexed",
     ]  # fără avertismente, fără eroare
+
+
+def test_index_refuses_before_building_real_vector_index(
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    """`check_indexable` trebuie să respingă documentul înainte de a construi
+    `PgVectorIndex.from_settings()` (care ar face I/O real spre Postgres/OpenAI)."""
+    calls: list[None] = []
+
+    def fake_from_settings() -> FakeVectors:
+        calls.append(None)
+        raise AssertionError("PgVectorIndex.from_settings nu trebuie construit")
+
+    monkeypatch.setattr(PgVectorIndex, "from_settings", fake_from_settings)
+
+    md = make_file(tmp_path, "carte.md", f"# Carte\n\n{MID}\n")
+    run(
+        session, "register", str(md), "--structured"
+    )  # stadiu 'structured', nu 'reviewed'
+
+    with caplog.at_level(logging.INFO):
+        code = main(
+            ["index", "carte"],
+            session=session,
+            converters=CONVERTERS,
+            restructurer=fake_restructure,
+            vectors=None,
+            questioner=FakeQuestions(),
+        )
+
+    assert code == 1
+    assert not calls  # from_settings nu a fost apelat
+    assert "cere 'reviewed'" in caplog.text
+    assert stages(session) == {"carte": Stage.structured}
 
 
 def test_index_failure_returns_1_and_status_shows_error(

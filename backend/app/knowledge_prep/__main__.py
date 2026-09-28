@@ -19,7 +19,7 @@ from sqlmodel import Session, col, select
 from app.knowledge_prep import registry
 from app.knowledge_prep.convert import CONVERTED_DIR
 from app.knowledge_prep.converters import CONVERTERS, Converter
-from app.knowledge_prep.index import index_document
+from app.knowledge_prep.index import check_indexable, index_document
 from app.knowledge_prep.models import Document, DocumentType, Stage
 from app.knowledge_prep.questions import QuestionGenerator, generate_questions
 from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
@@ -230,6 +230,9 @@ def _index(
 ) -> int:
     try:
         doc = registry.resolve(session, args.target)
+        check_indexable(
+            doc, force=args.force
+        )  # refuză înainte de a construi vectorii reali
         report = index_document(
             session,
             doc,
