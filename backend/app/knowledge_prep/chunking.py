@@ -24,7 +24,7 @@ ENCODING = "cl100k_base"  # tokenizer-ul lui text-embedding-3-large
 
 _HEADER = re.compile(r"^(#{1,4})[ \t]+(.+?)[ \t#]*$")
 _FENCE = re.compile(r"^[ \t]*(```|~~~)")
-_VERIFY = re.compile(r"[ \t]*<!--\s*VERIFICĂ.*?-->[ \t]*", re.S)
+_VERIFY = re.compile(r"[ \t]*\n?[ \t]*<!--\s*VERIFICĂ.*?-->[ \t]*\n?[ \t]*", re.S)
 
 
 @dataclass
@@ -48,7 +48,11 @@ def embedding_text(heading_path: list[str], text: str) -> str:
 
 
 def _strip_verify_markers(body: str) -> str:
-    return re.sub(r"\n{3,}", "\n\n", _VERIFY.sub("", body))
+    """Scoate marcajele `<!-- VERIFICĂ ... -->`, consumând și câte un rând gol adiacent
+    (unul înainte, unul după, dacă există), ca să nu rămână o gaură cu linii goale în plus
+    exact acolo unde a fost marcajul. Restul textului (fără marcaj în apropiere) rămâne
+    neatins, inclusiv rândurile goale multiple intenționate (blocuri de cod etc.)."""
+    return _VERIFY.sub("", body)
 
 
 def _split_sections(body: str) -> list[ChunkDraft]:

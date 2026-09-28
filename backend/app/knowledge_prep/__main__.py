@@ -240,8 +240,11 @@ def _index(
             questioner=questioner if args.questions else None,
             force=args.force,
         )
-    except Exception as e:  # regulă încălcată sau pas eșuat (last_error e deja scris)
+    except RegistryError as e:  # regulă încălcată (mesaj clar, fără traceback)
         logger.error("EROARE %s: %s", args.target, e)
+        return 1
+    except Exception as e:  # pas neașteptat (last_error e deja scris); traceback util
+        logger.exception("EROARE %s: %s", args.target, e)
         return 1
     logger.info(
         "%s: %s (%d chunk-uri, %d întrebări, %d avertismente)",

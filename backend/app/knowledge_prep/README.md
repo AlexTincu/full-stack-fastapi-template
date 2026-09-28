@@ -20,7 +20,7 @@ RAG.
 |---|---|---|
 | 1 | Registrul: `register`, `prepare` (doar conversie), `review`, `validate`, `status` | ✅ |
 | 2 | Restructurarea cu Gemini, în `prepare` | ✅ (2026-09-28) |
-| 3 | Indexarea: chunking, întrebări, `knowledge_vectors`, `index` | ✅ (2026-09-28) |
+| 3 | Indexarea: chunking, întrebări, `knowledge_vectors`, `index` | ✅ (2026-09-28, verificare reală în așteptare) |
 | 4 | Retrieval + evaluare | următoarea |
 | 5 | REST | — |
 
@@ -289,8 +289,8 @@ manuale se pierd)` — e un avertisment, comanda continuă.
 
 ### Limitări cunoscute
 
-- **Fără cache pe întrebări** (spre deosebire de `restructure.py`, care nu are cache pe ferestre
-  nici el, dar e mai puțin costisitor). O carte cu multe secțiuni întreruptă la mijloc (eroare
+- **Fără cache pe întrebări** (la fel ca `restructure.py`, care nu are nici el cache pe ferestre,
+  dar e mai puțin costisitor). O carte cu multe secțiuni întreruptă la mijloc (eroare
   de rețea, cotă Gemini) se reindexează de la zero la următoarea rulare — niciun chunk nu-și
   ține întrebările generate deja.
 - **Un apel Gemini per chunk, secvențial.** Nicio paralelizare: o carte cu 30 de secțiuni face

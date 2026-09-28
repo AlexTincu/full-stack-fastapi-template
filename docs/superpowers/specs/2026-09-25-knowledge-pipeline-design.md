@@ -272,7 +272,7 @@ Fiecare fază are propriul plan și e utilizabilă singură:
    `review`, `validate`; `prepare` fără restructurare (convertoarele existente); stadiul
    scos din front-matter. ✅
 2. **Restructurarea:** `restructure.py` și integrarea în `prepare`. ✅ 2026-09-28
-3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`). ✅ 2026-09-28
+3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`). ✅ 2026-09-28 (verificare reală în așteptare)
 4. **Retrieval + evaluare:** `ChunkDocStore`, `MultiVectorRetriever`, BM25, comparația
    baseline vs. multi-vector.
 5. **REST.**

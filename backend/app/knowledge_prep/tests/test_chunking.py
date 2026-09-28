@@ -78,6 +78,18 @@ def test_verify_markers_are_removed():
     assert "\n\n\n" not in chunk.text
 
 
+def test_strip_verify_markers_preserves_unrelated_multiple_blank_lines():
+    # 3+ newlines with no marker nearby (ex. într-un bloc de cod sau un split=false cu
+    # spațiere intenționată) trebuie să rămână neatinse, byte-identic.
+    body = "Paragraf unu.\n\n\n\nParagraf doi."
+    assert chunking._strip_verify_markers(body) == body
+
+
+def test_strip_verify_markers_removes_marker_without_leaving_extra_blank_lines():
+    body = "Paragraf unu.\n\n<!-- VERIFICĂ: motiv -->\n\nParagraf doi."
+    assert chunking._strip_verify_markers(body) == "Paragraf unu.\n\nParagraf doi."
+
+
 def test_code_fence_and_hashtag_are_not_headers():
     md = f"# Carte\n\n{MID}\n\n```\n# nu e titlu\n```\n\n#nici_asta nu e\n"
     [chunk], _ = chunk_markdown(md, "Titlu doc", split=True)
