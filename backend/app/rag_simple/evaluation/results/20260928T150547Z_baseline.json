@@ -1,0 +1,49 @@
+{
+  "label": "baseline",
+  "timestamp": "20260928T150547Z",
+  "config": {
+    "RETRIEVAL_K": 20,
+    "FINAL_K": 20,
+    "CHAT_MODEL": "openai:gpt-4.1-mini",
+    "EMBEDDING_MODEL": "openai:text-embedding-3-large"
+  },
+  "stage_metrics": {
+    "semantic": {
+      "mrr": 0.8556250000000001,
+      "ndcg": 0.8099138414759601,
+      "recall_at_5": 0.9199999999999999,
+      "recall_at_10": 0.9199999999999999,
+      "precision_at_5": 0.28933333333333333,
+      "precision_at_10": 0.2046666666666667,
+      "hit_rate_at_10": 1.0
+    },
+    "lexical": {
+      "mrr": 0.5807638888888889,
+      "ndcg": 0.6515139353544119,
+      "recall_at_5": 0.74,
+      "recall_at_10": 0.8800000000000001,
+      "precision_at_5": 0.23833333333333334,
+      "precision_at_10": 0.1625,
+      "hit_rate_at_10": 1.0
+    },
+    "fused": {
+      "mrr": 0.78075,
+      "ndcg": 0.7919807721131737,
+      "recall_at_5": 0.9199999999999999,
+      "recall_at_10": 0.9199999999999999,
+      "precision_at_5": 0.29833333333333334,
+      "precision_at_10": 0.17641666666666667,
+      "hit_rate_at_10": 1.0
+    },
+    "reranked": {
+      "mrr": 0.8995833333333334,
+      "ndcg": 0.8595341720326429,
+      "recall_at_5": 0.9075,
+      "recall_at_10": 0.9199999999999999,
+      "precision_at_5": 0.348,
+      "precision_at_10": 0.22033333333333335,
+      "hit_rate_at_10": 1.0
+    }
+  },
+  "notes": ""
+}

@@ -25,6 +25,15 @@ from app.core.config import settings # noqa
 
 target_metadata = SQLModel.metadata
 
+# Tabele gestionate în afara Alembic (create de LangChain direct); nu le include în autogenerate
+_ALEMBIC_EXCLUDE_TABLES = {"rag_simple_chunks"}
+
+
+def include_object(object, name, type_, reflected, compare_to):
+    if type_ == "table" and name in _ALEMBIC_EXCLUDE_TABLES:
+        return False
+    return True
+
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
@@ -49,7 +58,11 @@ def run_migrations_offline():
     """
     url = get_url()
     context.configure(
-        url=url, target_metadata=target_metadata, literal_binds=True, compare_type=True
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_type=True,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -74,7 +87,10 @@ def run_migrations_online():
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata, compare_type=True
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

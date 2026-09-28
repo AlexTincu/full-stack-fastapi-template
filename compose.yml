@@ -63,6 +63,10 @@ services:
       EMAILS_FROM_EMAIL: ${EMAILS_FROM_EMAIL}
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Variable not set}@db:5432/app
       SENTRY_DSN: ${SENTRY_DSN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Variable not set}
+      KNOWLEDGE_DIR: ${KNOWLEDGE_DIR:?Variable not set}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/utils/health-check/"]
