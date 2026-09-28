@@ -188,6 +188,11 @@ Modul nou `app/knowledge_prep/restructure.py`, apelat de `prepare`.
   o dată; apoi se păstrează încercarea mai bună, precedată de
   `<!-- VERIFICĂ: fereastra N, lipsă X%, adăugat Y% -->`.
 
+> **Implementat (2026-09-28)**, cu două precizări la verificare, venite din testul real:
+> titlurile nu se numără ca text „adăugat” (regula 6 le cere), iar n-gramele se calculează pe
+> fiecare paragraf separat, ca literele din jurul unui titlu scos din calcul să nu se lipească în
+> n-grame false. Detalii, rezultate și limitări: `backend/app/knowledge_prep/README.md`.
+
 ## Indexarea
 
 Modul nou `app/knowledge_prep/index.py`, apelat de `index`.
@@ -260,8 +265,8 @@ Fiecare fază are propriul plan și e utilizabilă singură:
 
 1. **Registrul:** modele + migrare, `register` (inclusiv `--structured`), `status`,
    `review`, `validate`; `prepare` fără restructurare (convertoarele existente); stadiul
-   scos din front-matter.
-2. **Restructurarea:** `restructure.py` și integrarea în `prepare`.
+   scos din front-matter. ✅
+2. **Restructurarea:** `restructure.py` și integrarea în `prepare`. ✅ 2026-09-28
 3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`).
 4. **Retrieval + evaluare:** `ChunkDocStore`, `MultiVectorRetriever`, BM25, comparația
    baseline vs. multi-vector.
