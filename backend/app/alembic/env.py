@@ -27,10 +27,13 @@ target_metadata = SQLModel.metadata
 
 # Tabele gestionate în afara Alembic (create de LangChain direct); nu le include în autogenerate
 _ALEMBIC_EXCLUDE_TABLES = {"rag_simple_chunks"}
+_ALEMBIC_EXCLUDE_PREFIXES = ("knowledge_vectors",)  # knowledge_prep/vectors.py (+ tabelele de test)
 
 
 def include_object(object, name, type_, reflected, compare_to):
-    if type_ == "table" and name in _ALEMBIC_EXCLUDE_TABLES:
+    if type_ == "table" and (
+        name in _ALEMBIC_EXCLUDE_TABLES or name.startswith(_ALEMBIC_EXCLUDE_PREFIXES)
+    ):
         return False
     return True
 
