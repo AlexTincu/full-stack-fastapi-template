@@ -21,6 +21,7 @@ from app.knowledge_prep.convert import CONVERTED_DIR
 from app.knowledge_prep.converters import CONVERTERS, Converter
 from app.knowledge_prep.models import Document, DocumentType, Stage
 from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
+from app.knowledge_prep.restructure import Restructurer, restructure
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +58,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="implicit: fără split pentru regim, nota, insight",
     )
 
-    prep = sub.add_parser("prepare", help="conversia originalului → 'structured'")
+    prep = sub.add_parser(
+        "prepare", help="conversia (+ restructurarea) originalului → 'structured'"
+    )
     prep.add_argument("target", help="id, slug, cale sau folder")
     prep.add_argument(
         "--force",
         action="store_true",
         help="suprascrie markdown-ul existent; readuce un document 'reviewed'+ în 'structured'",
+    )
+    prep.add_argument(
+        "--restructure",
+        action=argparse.BooleanOptionalAction,
+        help="corectură + structurare cu Gemini; implicit da, în afară de PDF",
     )
 
     sub.add_parser("review", help="→ 'reviewed', salvează hash-ul").add_argument(
@@ -140,7 +148,10 @@ def _register(
 
 
 def _prepare(
-    args: argparse.Namespace, session: Session, converters: Mapping[str, Converter]
+    args: argparse.Namespace,
+    session: Session,
+    converters: Mapping[str, Converter],
+    restructurer: Restructurer,
 ) -> int:
     folder = Path(args.target)
     if folder.is_dir():
@@ -165,7 +176,14 @@ def _prepare(
             return 1
 
     def prepare_one(doc: Document) -> str:
-        out = registry.prepare(session, doc, force=args.force, converters=converters)
+        out = registry.prepare(
+            session,
+            doc,
+            force=args.force,
+            restructure=args.restructure,
+            converters=converters,
+            restructurer=restructurer,
+        )
         return f"scris: {out}"
 
     failed = _run_each(session, docs, prepare_one, "{0.slug}")
@@ -216,13 +234,14 @@ def _dispatch(
     args: argparse.Namespace,
     session: Session,
     converters: Mapping[str, Converter],
+    restructurer: Restructurer,
     parser: argparse.ArgumentParser,
 ) -> int:
     match args.command:
         case "register":
             return _register(args, session, converters, parser)
         case "prepare":
-            return _prepare(args, session, converters)
+            return _prepare(args, session, converters, restructurer)
         case "review":
             return _single(registry.review, args, session)
         case "validate":
@@ -236,6 +255,7 @@ def main(
     *,
     session: Session | None = None,
     converters: Mapping[str, Converter] = CONVERTERS,
+    restructurer: Restructurer = restructure,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -244,11 +264,11 @@ def main(
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     if session is not None:
-        return _dispatch(args, session, converters, parser)
+        return _dispatch(args, session, converters, restructurer, parser)
     from app.core.db import engine  # doar la rulare reală: cere .env + Postgres
 
     with Session(engine) as s:
-        return _dispatch(args, s, converters, parser)
+        return _dispatch(args, s, converters, restructurer, parser)
 
 
 if __name__ == "__main__":

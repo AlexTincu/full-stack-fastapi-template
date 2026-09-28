@@ -17,6 +17,7 @@ from sqlmodel import Session, col, or_, select
 from app.knowledge_prep.convert import CONVERTED_DIR, convert
 from app.knowledge_prep.converters import CONVERTERS, Converter
 from app.knowledge_prep.converters.audio import AUDIO_EXTENSIONS
+from app.knowledge_prep.converters.pdf import PDF_EXTENSIONS
 from app.knowledge_prep.frontmatter import (
     FrontMatter,
     render,
@@ -26,6 +27,8 @@ from app.knowledge_prep.frontmatter import (
     title_from_filename,
 )
 from app.knowledge_prep.models import Document, DocumentType, Stage
+from app.knowledge_prep.restructure import Restructurer
+from app.knowledge_prep.restructure import restructure as restructure_markdown
 from app.models import get_datetime_utc
 
 UNSPLIT_TYPES = {DocumentType.regim, DocumentType.nota, DocumentType.insight}
@@ -206,10 +209,14 @@ def prepare(
     doc: Document,
     *,
     force: bool = False,
+    restructure: bool | None = None,
     converters: Mapping[str, Converter] = CONVERTERS,
+    restructurer: Restructurer = restructure_markdown,
 ) -> Path:
-    """Original → `<folderul originalului>/converted/<slug>.md` → `structured`.
+    """Original → conversie → restructurare → `<folderul originalului>/converted/<slug>.md` → `structured`.
 
+    Restructurarea (`restructure.py`) rulează implicit pentru tot în afară de PDF, al cărui
+    prompt structurează deja; `restructure` o forțează sau o oprește.
     Un markdown existent (editat poate de om) sau un document `reviewed`+ se suprascrie
     doar cu `force`; chunk-urile deja indexate rămân în DB până la următorul `index`.
     """
@@ -224,8 +231,12 @@ def prepare(
             "folosește --force ca să-l suprascrii."
         )
     original = Path(doc.original_path)
+    if restructure is None:
+        restructure = original.suffix.lower() not in PDF_EXTENSIONS
     with record_step(session, doc):
         body = convert(original, converters=converters)
+        if restructure:
+            body = restructurer(body, doc.title)
         fm = FrontMatter(
             title=doc.title,
             slug=doc.slug,

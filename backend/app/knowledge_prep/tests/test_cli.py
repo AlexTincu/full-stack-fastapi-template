@@ -1,10 +1,12 @@
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from sqlmodel import Session, select
 
 from app.knowledge_prep.__main__ import main
+from app.knowledge_prep.converters import Converter
 from app.knowledge_prep.models import Document, Stage
 
 
@@ -26,8 +28,19 @@ def make_file(tmp_path: Path, name: str, content: str = "brut") -> Path:
     return f
 
 
-def run(session: Session, *argv: str) -> int:
-    return main(list(argv), session=session, converters=CONVERTERS)
+def fake_restructure(body: str, title: str) -> str:
+    return f"# {title}\n\n{body}"
+
+
+def run(
+    session: Session, *argv: str, converters: Mapping[str, Converter] = CONVERTERS
+) -> int:
+    return main(
+        list(argv),
+        session=session,
+        converters=converters,
+        restructurer=fake_restructure,
+    )
 
 
 def stages(session: Session) -> dict[str, Stage]:
@@ -110,7 +123,7 @@ def test_status_shows_last_error(
     def broken(_p: Path) -> str:
         raise RuntimeError("API căzut")
 
-    assert main(["prepare", "a"], session=session, converters={".txt": broken}) == 1
+    assert run(session, "prepare", "a", converters={".txt": broken}) == 1
     capsys.readouterr()
     assert run(session, "status", "a") == 0
     out = capsys.readouterr().out
@@ -141,9 +154,10 @@ def test_prepare_folder_continues_after_a_failure(session: Session, tmp_path: Pa
     def broken(_p: Path) -> str:
         raise RuntimeError("API căzut")
 
-    code = main(
-        ["prepare", str(tmp_path / "baza")],
-        session=session,
+    code = run(
+        session,
+        "prepare",
+        str(tmp_path / "baza"),
         converters={".txt": broken, ".ogg": fake_audio},
     )
 
@@ -175,3 +189,16 @@ def test_broken_frontmatter_is_reported_not_crashing(
     assert "neînchis" in capsys.readouterr().out
     assert run(session, "review", "a") == 1
     assert "neînchis" in caplog.text
+
+
+def test_prepare_restructures_unless_no_restructure(session: Session, tmp_path: Path):
+    make_file(tmp_path, "a.txt")
+    make_file(tmp_path, "b.txt")
+    run(session, "register", str(tmp_path / "baza"))
+
+    assert run(session, "prepare", "a") == 0
+    assert run(session, "prepare", "b", "--no-restructure") == 0
+
+    converted = tmp_path / "baza" / "converted"
+    assert (converted / "a.md").read_text().endswith("\n# a\n\nconținut din a.txt\n")
+    assert (converted / "b.md").read_text().endswith("---\n\nconținut din b.txt\n")

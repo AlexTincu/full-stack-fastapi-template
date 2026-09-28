@@ -1,6 +1,6 @@
 """`.txt` / `.md` → markdown: doar curățare mecanică, conținutul rămâne cum e.
 
-Structurarea (titluri h1-h3) și eventualele diacritice lipsă nu se rezolvă aici (vezi taskul 2 din docs/taskuri.md).
+Corectura (diacritice lipsă, caractere stricate) și structurarea (titluri, liste) le face `restructure.py`, la `prepare`.
 """
 
 import re

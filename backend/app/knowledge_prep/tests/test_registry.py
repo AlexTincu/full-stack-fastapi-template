@@ -1,12 +1,15 @@
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 from sqlmodel import Session
 
 from app.knowledge_prep import registry
+from app.knowledge_prep.converters import Converter
 from app.knowledge_prep.frontmatter import FrontMatter, render, split_frontmatter
 from app.knowledge_prep.models import Document, DocumentType, Stage
 from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
+from app.knowledge_prep.restructure import Restructurer
 
 
 def fake_converter(path: Path) -> str:
@@ -23,8 +26,31 @@ def make_file(tmp_path: Path, name: str, content: str = "brut") -> Path:
     return f
 
 
+def fake_restructure(body: str, title: str) -> str:
+    return f"# {title}\n\n{body}"
+
+
 def reg(session: Session, path: Path, **kwargs) -> Document:
     return registry.register(session, path, converters=CONVERTERS, **kwargs)
+
+
+def prep(
+    session: Session,
+    doc: Document,
+    *,
+    force: bool = False,
+    restructure: bool | None = None,
+    converters: Mapping[str, Converter] = CONVERTERS,
+    restructurer: Restructurer = fake_restructure,
+) -> Path:
+    return registry.prepare(
+        session,
+        doc,
+        force=force,
+        restructure=restructure,
+        converters=converters,
+        restructurer=restructurer,
+    )
 
 
 def structured_doc(
@@ -245,7 +271,7 @@ def test_prepare_writes_markdown_with_frontmatter_and_moves_to_structured(
     src = make_file(tmp_path, "regimuri/Regim DRI - Anemie.txt")
     doc = reg(session, src, doc_type=DocumentType.regim, author="DRI")
 
-    out = registry.prepare(session, doc, converters=CONVERTERS)
+    out = prep(session, doc)
 
     assert out == src.parent.resolve() / "converted" / "regim-dri-anemie.md"
     meta, body = split_frontmatter(out.read_text())
@@ -256,7 +282,7 @@ def test_prepare_writes_markdown_with_frontmatter_and_moves_to_structured(
         "author": "DRI",
         "source_file": "Regim DRI - Anemie.txt",
     }
-    assert body == "conținut din Regim DRI - Anemie.txt\n"
+    assert body == "# Regim DRI - Anemie\n\nconținut din Regim DRI - Anemie.txt\n"
     assert (doc.stage, doc.last_error) == (Stage.structured, None)
     assert src.read_text() == "brut"
 
@@ -265,18 +291,18 @@ def test_prepare_without_original_fails_clearly(session: Session, tmp_path: Path
     doc, _ = structured_doc(session, tmp_path)
     assert doc.original_path is None
     with pytest.raises(RegistryError, match="original"):
-        registry.prepare(session, doc, converters=CONVERTERS, force=True)
+        prep(session, doc, force=True)
 
 
 def test_prepare_does_not_overwrite_existing_markdown_without_force(
     session: Session, tmp_path: Path
 ):
     doc = reg(session, make_file(tmp_path, "a.txt"))
-    out = registry.prepare(session, doc, converters=CONVERTERS)
+    out = prep(session, doc)
     out.write_text(out.read_text() + "editat de om\n")
 
     with pytest.raises(RegistryError, match="--force"):
-        registry.prepare(session, doc, converters=CONVERTERS)
+        prep(session, doc)
     assert out.read_text().endswith("editat de om\n")
 
 
@@ -284,13 +310,13 @@ def test_prepare_force_on_reviewed_returns_to_structured(
     session: Session, tmp_path: Path
 ):
     doc = reg(session, make_file(tmp_path, "a.txt"))
-    registry.prepare(session, doc, converters=CONVERTERS)
+    prep(session, doc)
     doc = registry.review(session, doc)
     doc.indexed_hash = doc.reviewed_hash
 
     with pytest.raises(RegistryError, match="--force"):
-        registry.prepare(session, doc, converters=CONVERTERS)
-    registry.prepare(session, doc, converters=CONVERTERS, force=True)
+        prep(session, doc)
+    prep(session, doc, force=True)
 
     assert (doc.stage, doc.reviewed_hash) == (Stage.structured, None)
     assert doc.indexed_hash is not None  # chunk-urile rămân până la următorul index
@@ -305,6 +331,59 @@ def test_prepare_failure_records_error_and_keeps_stage(
         raise RuntimeError("API căzut")
 
     with pytest.raises(RuntimeError):
-        registry.prepare(session, doc, converters={".txt": broken})
+        prep(session, doc, converters={".txt": broken})
     assert (doc.stage, doc.last_error) == (Stage.uploaded, "RuntimeError: API căzut")
+    assert not Path(doc.markdown_path).exists()
+
+
+def test_prepare_restructures_text_and_audio_but_not_pdf_by_default(
+    session: Session, tmp_path: Path
+):
+    converters = {**CONVERTERS, ".pdf": fake_converter}
+    txt = reg(session, make_file(tmp_path, "a.txt"))
+    audio = reg(session, make_file(tmp_path, "b.ogg"))
+    pdf = registry.register(
+        session, make_file(tmp_path, "c.pdf"), converters=converters
+    )
+
+    bodies = [
+        split_frontmatter(prep(session, d, converters=converters).read_text())[1]
+        for d in (txt, audio, pdf)
+    ]
+
+    assert bodies == [
+        "# a\n\nconținut din a.txt\n",
+        "# b\n\ntranscriere\n",
+        "conținut din c.pdf\n",
+    ]
+
+
+def test_prepare_restructure_flag_overrides_default(session: Session, tmp_path: Path):
+    converters = {**CONVERTERS, ".pdf": fake_converter}
+    txt = reg(session, make_file(tmp_path, "a.txt"))
+    pdf = registry.register(
+        session, make_file(tmp_path, "b.pdf"), converters=converters
+    )
+
+    txt_md = prep(session, txt, converters=converters, restructure=False)
+    pdf_md = prep(session, pdf, converters=converters, restructure=True)
+
+    assert split_frontmatter(txt_md.read_text())[1] == "conținut din a.txt\n"
+    assert split_frontmatter(pdf_md.read_text())[1] == "# b\n\nconținut din b.pdf\n"
+
+
+def test_prepare_restructure_failure_records_error_and_writes_nothing(
+    session: Session, tmp_path: Path
+):
+    doc = reg(session, make_file(tmp_path, "a.txt"))
+
+    def broken(_body: str, _title: str) -> str:
+        raise RuntimeError("Gemini căzut")
+
+    with pytest.raises(RuntimeError):
+        prep(session, doc, restructurer=broken)
+    assert (doc.stage, doc.last_error) == (
+        Stage.uploaded,
+        "RuntimeError: Gemini căzut",
+    )
     assert not Path(doc.markdown_path).exists()
