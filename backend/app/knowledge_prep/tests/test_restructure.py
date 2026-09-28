@@ -67,6 +67,15 @@ def test_restructure_new_headers_do_not_count_as_added_text():
     assert len(client.messages) == 1
 
 
+def test_restructure_existing_title_turned_into_header_is_not_added_text():
+    # fără titlu, literele de dinainte și de după lui s-ar lipi în n-grame noi
+    body = f"{PARA}\n\nBeneficii germeni\n\n{SECOND}\n"
+    reply = f"# Grâul încolțit\n\n{PARA}\n\n## Beneficii germeni\n\n{SECOND}"
+    client = FakeClient([reply])
+    assert run(body, client) == reply + "\n"
+    assert len(client.messages) == 1
+
+
 def test_restructure_retries_window_with_missing_text_then_accepts():
     body = f"{PARA}\n\n{SECOND}\n"
     client = FakeClient([PARA, body])

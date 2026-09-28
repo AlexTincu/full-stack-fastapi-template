@@ -2,19 +2,20 @@
 
 Corpul se taie în ferestre de ~8k tokeni, la granițe de paragraf. Fiecare fereastră primește
 calea de titluri de la finalul celei anterioare, ca ierarhia să continue în tot documentul.
-Rezultatul se verifică pe litere față de fereastră (`pdf.missing_fraction`, în ambele sensuri):
+Rezultatul se verifică pe n-grame de litere față de fereastră (`pdf.shingles`), în ambele sensuri:
 peste prag se reîncearcă o dată, apoi se păstrează încercarea mai bună, marcată `VERIFICĂ`.
 """
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable
 
 from google import genai
 
 from app.knowledge_prep.converters.diacritics import normalize
 from app.knowledge_prep.converters.gemini import client_and_model, generate
-from app.knowledge_prep.converters.pdf import missing_fraction
+from app.knowledge_prep.converters.pdf import shingles
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,27 @@ def _clean(text: str) -> str:
     return normalize(text)
 
 
+def _paragraph_shingles(text: str) -> Counter[str]:
+    # pe paragrafe: altfel, un titlu scos din text ar lipi literele vecinilor în n-grame noi
+    return sum((shingles(p) for p in re.split(r"\n\s*\n", text)), Counter())
+
+
+def _fraction(part: Counter[str], whole: Counter[str]) -> float:
+    return part.total() / whole.total() if whole else 0.0
+
+
+def _diff(window: str, text: str) -> tuple[float, float]:
+    """(lipsă, adăugat) față de fereastră, ca în `pdf.missing_fraction`.
+
+    Titlurile noi sunt cerute de prompt (regula 6), deci nu contează ca text adăugat;
+    la „lipsă” rămân, pentru că titlurile scoase din text conțin text original.
+    """
+    original = _paragraph_shingles(window)
+    added = _paragraph_shingles(_HEADER.sub("", text))
+    missing = original - _paragraph_shingles(text)
+    return _fraction(missing, original), _fraction(added - original, added)
+
+
 def _restructure_window(
     client: genai.Client, model: str, window: str, message: str, n: int
 ) -> str:
@@ -129,12 +151,7 @@ def _restructure_window(
             logger.warning("  fereastra %d: răspuns gol (încercarea %d)", n, attempt)
             continue
         text = _clean(reply)
-        # Titlurile noi sunt cerute de prompt (regula 6), deci nu contează ca text adăugat;
-        # la „lipsă” rămân, pentru că titlurile scoase din text conțin text original.
-        diff = (
-            missing_fraction(window, text),
-            missing_fraction(_HEADER.sub("", text), window),
-        )
+        diff = _diff(window, text)
         if max(diff) <= MAX_DIFF:
             return text
         logger.warning(

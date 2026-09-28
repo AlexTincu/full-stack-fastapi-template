@@ -96,14 +96,20 @@ def _letters(text: str) -> str:
     )
 
 
+def shingles(text: str) -> Counter[str]:
+    """Multisetul n-gramelor de litere din `text`."""
+    letters = _letters(text)
+    return Counter(
+        letters[i : i + _SHINGLE] for i in range(len(letters) - _SHINGLE + 1)
+    )
+
+
 def missing_fraction(reference: str, text: str) -> float:
     """Cât din `reference` (pypdf) lipsește din `text` (Gemini), ca multiset de n-grame de litere, independent de ordine."""
-    ref, out = _letters(reference), _letters(text)
-    expected = Counter(ref[i : i + _SHINGLE] for i in range(len(ref) - _SHINGLE + 1))
+    expected = shingles(reference)
     if not expected:
         return 0.0
-    found = Counter(out[i : i + _SHINGLE] for i in range(len(out) - _SHINGLE + 1))
-    return (expected - found).total() / expected.total()
+    return (expected - shingles(text)).total() / expected.total()
 
 
 def _chunk_pdf(reader: PdfReader, start: int, end: int) -> bytes:
