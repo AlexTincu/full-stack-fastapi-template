@@ -224,6 +224,11 @@ Modul nou `app/knowledge_prep/index.py`, apelat de `index`.
 5. Dacă documentul era `validated`, comanda cere `--force` și avertizează că întrebările
    editate manual se pierd.
 
+> **Implementat (2026-09-28)**, cu precizări: parser propriu de titluri în loc de
+> MarkdownHeaderTextSplitter (păstrează textul exact); embeddings înainte de scrierea
+> relațională și ștergerea vectorilor după document_id; knowledge_vectors creat de PGEngine,
+> nu de Alembic. Detalii: backend/app/knowledge_prep/README.md.
+
 ## Retrieval
 
 Modul nou (numele se stabilește în planul fazei 4), fără modificări în `rag_simple`.
@@ -267,7 +272,7 @@ Fiecare fază are propriul plan și e utilizabilă singură:
    `review`, `validate`; `prepare` fără restructurare (convertoarele existente); stadiul
    scos din front-matter. ✅
 2. **Restructurarea:** `restructure.py` și integrarea în `prepare`. ✅ 2026-09-28
-3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`).
+3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`). ✅ 2026-09-28
 4. **Retrieval + evaluare:** `ChunkDocStore`, `MultiVectorRetriever`, BM25, comparația
    baseline vs. multi-vector.
 5. **REST.**

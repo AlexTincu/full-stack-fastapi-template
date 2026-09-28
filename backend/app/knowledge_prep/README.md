@@ -9,7 +9,8 @@ RAG.
   Are prioritate față de acest README la „ce trebuie să facă”.
 - **Cum s-a implementat, pas cu pas:** planurile din
   [`docs/superpowers/plans/`](../../../docs/superpowers/plans/) (`2026-09-26-knowledge-registry-plan.md`
-  pentru faza 1, `2026-09-28-knowledge-restructure-plan.md` pentru faza 2).
+  pentru faza 1, `2026-09-28-knowledge-restructure-plan.md` pentru faza 2,
+  `2026-09-28-knowledge-index-plan.md` pentru faza 3).
 - **Acest README:** cum funcționează codul azi, de ce arată așa și ce trebuie știut înainte de
   a-l modifica.
 
@@ -19,8 +20,8 @@ RAG.
 |---|---|---|
 | 1 | Registrul: `register`, `prepare` (doar conversie), `review`, `validate`, `status` | ✅ |
 | 2 | Restructurarea cu Gemini, în `prepare` | ✅ (2026-09-28) |
-| 3 | Indexarea: chunking, întrebări, `knowledge_vectors`, `index` | următoarea |
-| 4 | Retrieval + evaluare | — |
+| 3 | Indexarea: chunking, întrebări, `knowledge_vectors`, `index` | ✅ (2026-09-28) |
+| 4 | Retrieval + evaluare | următoarea |
 | 5 | REST | — |
 
 ## Fluxul
@@ -30,6 +31,9 @@ register ──> uploaded ──prepare──> structured ──review──> re
                                         ▲
 register --structured ──────────────────┘
 ```
+
+`index` = **chunking** + **întrebări** (Gemini, opțional) + **embeddings** (OpenAI) →
+`knowledge_vectors`. Detalii în secțiunea „Indexarea” de mai jos.
 
 `prepare` = **conversie** (convertorul extensiei) + **restructurare** (Gemini) → scrie
 `<folderul originalului>/converted/<slug>.md` cu front-matter. Omul revizuiește fișierul în IDE,
@@ -47,13 +51,16 @@ Din `full-stack-fastapi-template/backend/`:
 uv run python -m app.knowledge_prep register "<fișier|folder>" [--structured] [--type regim] [--title "..."] [--author "..."] [--split/--no-split]
 uv run python -m app.knowledge_prep prepare <id|slug|cale|folder> [--force] [--restructure/--no-restructure]
 uv run python -m app.knowledge_prep review|validate <id|slug|cale>
+uv run python -m app.knowledge_prep index <id|slug|cale> [--no-questions] [--force]
 uv run python -m app.knowledge_prep status [<țintă>]
 
 uv run pytest app/knowledge_prep                            # fără Postgres și fără Gemini
 uv run ruff check app/knowledge_prep && uv run ty check app/knowledge_prep
 ```
 
-Ai nevoie de `GEMINI_API_KEY` și `GEMINI_MODEL` în `full-stack-fastapi-template/.env`.
+Ai nevoie de `GEMINI_API_KEY` și `GEMINI_MODEL` în `full-stack-fastapi-template/.env`. `index`
+are nevoie și de `OPENAI_API_KEY` (embeddings, `text-embedding-3-large`), pe lângă cheile Gemini
+(întrebările, dacă nu rulezi cu `--no-questions`).
 
 ## Harta modulului
 
@@ -66,6 +73,11 @@ Ai nevoie de `GEMINI_API_KEY` și `GEMINI_MODEL` în `full-stack-fastapi-templat
 | `converters/` | câte un convertor pe format: `pdf.py`, `audio.py`, `text.py`; plus `gemini.py` (client, thinking oprit, retry) și `diacritics.py` (`ş/ţ → ș/ț`) |
 | `restructure.py` | corectura și structurarea cu Gemini (faza 2, detalii mai jos) |
 | `frontmatter.py` | front-matter informativ, `slugify`, `split_frontmatter` |
+| `chunking.py` | `chunk_markdown`: markdown revizuit → `ChunkDraft`-uri (faza 3, detalii mai jos) |
+| `questions.py` | `generate_questions`: 1-5 întrebări Gemini per chunk, output structurat (faza 3) |
+| `vectors.py` | `PgVectorIndex` / `VectorEntry`: tabelul `knowledge_vectors`, embeddings OpenAI (faza 3) |
+| `index.py` | `index_document`: orchestrează chunking + întrebări + vectori într-un pas (faza 3) |
+| `tests/index_fakes.py` | `FakeVectors`, `FakeQuestions` — fake-urile injectate în testele fazei 3 |
 
 ## Restructurarea (`restructure.py`)
 
@@ -174,6 +186,134 @@ fără să rulezi din nou testul real:**
 | alt model | `GEMINI_MODEL` în `.env`; thinking-ul se alege în `converters/gemini.py::thinking_config` |
 | refaci restructurarea unui document | `prepare <țintă> --force` (îl readuce în `structured`; reviewul se pierde) |
 
+## Indexarea (`chunking.py`, `questions.py`, `vectors.py`, `index.py`)
+
+### Ce rezolvă
+
+Transformă un document `reviewed` în ce citește retrieval-ul (faza 4): `chunk`-uri (secțiuni
+sau documentul întreg), 1-5 `question`-uri Gemini per chunk (pentru multi-vector retrieval —
+o întrebare formulată ca a utilizatorului găsește chunk-ul chiar dacă textul lui e formulat
+altfel) și vectorii lor în `knowledge_vectors`. `index <țintă>` face toți cei trei pași
+dintr-o comandă; `--no-questions` sare peste întrebări (indexează doar vectorii `content`,
+baseline-ul din spec).
+
+### Ordinea pașilor, și de ce
+
+`index_document` (`index.py`) face, în ordine:
+
+1. **Tot ce cere un API extern, în memorie, înainte de orice scriere:** generarea
+   întrebărilor (Gemini, dacă nu e `--no-questions`) și embeddings (OpenAI, pentru toate
+   textele `content` + `question` deodată).
+2. **`chunk` și `question` se înlocuiesc într-o singură tranzacție relațională:** se șterg
+   `Question` (după `chunk_id`) și `Chunk` (după `document_id`) ale documentului, apoi se
+   inserează cele noi. Commit.
+3. **Vectorii se șterg după `document_id`**, apoi se adaugă cei noi (`vectors.replace_document`).
+   Ștergerea după `document_id`, nu după id-urile chunk-urilor vechi, curăță și resturile
+   unei rulări anterioare întrerupte la pasul 3.
+4. Abia acum `doc.stage = indexed`, `doc.indexed_hash = doc.reviewed_hash`.
+
+Motivul ordinii: API-urile (pașii 1 și, pentru vectori, embeddings din pasul 3) sunt partea
+care poate eșua din motive externe (cotă, rețea), și un eșec acolo nu trebuie să lase nimic
+pe jumătate scris. Ce rămâne în urmă, pe tip de eșec (toate scriu `last_error` prin
+`record_step`, stadiul rămânând cel dinainte de `index`):
+
+- **Eșec la întrebări sau la embeddings** (pasul 1): nimic nu s-a scris încă — `chunk` și
+  `question` vechi rămân neatinse, vectorii vechi la fel.
+- **Eșec la scrierea vectorilor** (pasul 3, după commit-ul relațional de la pasul 2): `chunk`
+  și `question` sunt **deja** cele noi (commit-ul s-a făcut), dar `knowledge_vectors` a fost
+  golit de `delete(filter={"document_id": ...})` înainte de eșecul la inserare — documentul
+  are chunk-uri fără vectori. Dacă documentul pornea de la `reviewed` (primul `index`),
+  `doc.stage` rămâne `reviewed`, deci pare „neindexat” deși are chunk-uri noi în DB. **Dacă
+  documentul era deja `indexed` sau `validated` (reindexare)**, `doc.stage` nu se schimbă în
+  acest pas eșuat — deci rămâne `indexed`/`validated` cu vectori inexistenți; singurul semnal
+  e `last_error`, nu stadiul. În ambele cazuri, o nouă rulare `index` (fără `--force` dacă
+  stadiul era `reviewed`, cu `--force` dacă era `validated`) reface totul corect: chunk-urile
+  se recreează identic, iar vectorii se scriu din nou.
+
+`__main__.py::_index` cheamă `check_indexable(doc, force=...)` **înainte** de a construi
+`PgVectorIndex.from_settings()` (fix din 48ed5f3): o regulă încălcată (stadiu, hash modificat,
+`validated` fără `--force`) se raportează fără nicio conexiune reală la Postgres sau OpenAI.
+`index_document` verifică din nou regulile la început (`check_indexable`), ca apelul direct
+din Python/teste să fie la fel de sigur.
+
+### Chunking-ul (`chunking.py`)
+
+- **`split=false`** (regimuri, note, insight-uri): un singur chunk, tot corpul,
+  `heading_path = [titlul documentului]`. Avertizează dacă depășește `UNSPLIT_WARN_TOKENS`
+  (8000; limita lui `text-embedding-3-large` e 8191) — vectorul `content` devine o medie pe
+  bucăți, imprecisă, dar întrebările nu sunt afectate (tot corpul intră în promptul Gemini).
+- **`split=true`:** o secțiune la fiecare titlu `#`-`####` din afara blocurilor de cod
+  (headerele rămân în text), apoi:
+  - secțiunile sub `MIN_CHUNK_TOKENS` (80) se lipesc de **următoarea** secțiune, dar doar
+    dacă aceea e soră sau descendentă a aceluiași părinte (`heading_path[:-1]`); dacă
+    următoarea secțiune sare într-o altă ramură, secțiunea mică rămâne mică, de sine
+    stătătoare — nu sare granița de părinte. Calea rezultată e prefixul comun al celor două
+    căi, **cu o excepție**: dacă secțiunea mică nu are decât linii de titlu (un `#` urmat
+    direct de un subtitlu, fără text propriu între ele), chunk-ul unit ia calea **întreagă**
+    a secțiunii următoare — titlul „gol” era doar structură, nu conținut care să justifice
+    un prefix mai scurt;
+  - secțiunile peste `MAX_CHUNK_TOKENS` (1000) se taie cu `RecursiveCharacterTextSplitter`
+    (overlap `CHUNK_OVERLAP_TOKENS`, 150), păstrând `heading_path` neschimbat pe fiecare bucată;
+  - marcajele `<!-- VERIFICĂ: ... -->` lăsate de restructurare se scot înainte de orice.
+- **Parserul de titluri e propriu, nu `MarkdownHeaderTextSplitter`.** Acela scoate rândurile
+  goale dintre linii și le lipește cu `"  \n"` (line break markdown), deci schimbă textul
+  exact: `"# A\n\nText."` devine `"# A  \nText."` — rândul gol dintre titlu și text dispare.
+  Pentru `chunk.text`, care trebuie să rămână identic cu markdown-ul revizuit (viitorul REST
+  din faza 5 îl arată și îl editează așa cum e), asta nu e acceptabil. Mai grav, fără
+  rândurile goale `RecursiveCharacterTextSplitter` nu mai găsește granițele de paragraf ca
+  să taie secțiunile mari acolo. Parserul propriu (`_split_sections`) doar urmărește nivelul
+  titlurilor, fără să atingă vreun caracter din text.
+
+### `knowledge_vectors`
+
+Un rând pe vector-copil: `content` (un rând per chunk, `id = chunk.id`) sau `question` (un
+rând per întrebare, `id = question.id`). Coloane de metadate filtrabile: `doc_id` (chunk-ul
+părinte — cheia lui `MultiVectorRetriever` din faza 4), `document_id`, `kind`. Textul embedded:
+pentru `content`, `heading_path` unit cu ` > ` + rând gol + `chunk.text` (`embedding_text`,
+în `chunking.py`); pentru `question`, doar textul întrebării.
+
+Tabelul îl creează `PGEngine.init_vectorstore_table` la prima folosire (`PgVectorIndex.__init__`
+verifică întâi dacă există, ca în `rag_simple`), **nu Alembic**: schema e a lui
+`langchain_postgres`, iar `alembic/env.py` (`_ALEMBIC_EXCLUDE_PREFIXES`) o exclude explicit din
+autogenerate. **Fără index ANN:** pgvector indexează coloana `vector` doar până la 2000 de
+dimensiuni, iar `text-embedding-3-large` are 3072 — la câteva mii de rânduri, scanarea exactă
+e suficient de rapidă.
+
+### `validated` → `--force`
+
+Reindexarea unui document `validated` cere `--force`: altfel, `check_indexable` refuză cu un
+mesaj explicit că întrebările existente (eventual editate manual în faza 5 REST) s-ar pierde.
+Independent de `--force`, dacă documentul are deja întrebări (orice reindexare, nu doar peste
+`validated`), `index_document` avertizează `se înlocuiesc N întrebări existente (editările
+manuale se pierd)` — e un avertisment, comanda continuă.
+
+### Limitări cunoscute
+
+- **Fără cache pe întrebări** (spre deosebire de `restructure.py`, care nu are cache pe ferestre
+  nici el, dar e mai puțin costisitor). O carte cu multe secțiuni întreruptă la mijloc (eroare
+  de rețea, cotă Gemini) se reindexează de la zero la următoarea rulare — niciun chunk nu-și
+  ține întrebările generate deja.
+- **Un apel Gemini per chunk, secvențial.** Nicio paralelizare: o carte cu 30 de secțiuni face
+  30 de apeluri unul după altul. Acceptabil la dimensiunile actuale ale corpusului.
+- **`tiktoken` descarcă encoderul `cl100k_base` la prima rulare** (cache local după aceea,
+  vezi `tiktoken`), deci primul `index` (sau primul test care numără tokeni) are nevoie de
+  acces la internet.
+
+### Rezultate reale
+
+_De completat după verificarea manuală (planul, taskul 7) — nu s-a rulat încă la data acestui
+README._
+
+### Cum se reglează
+
+| Vrei să… | Modifici |
+|---|---|
+| chunk-uri mai mari/mici | `MIN_CHUNK_TOKENS`, `MAX_CHUNK_TOKENS` (`chunking.py`) |
+| overlap la tăierea secțiunilor mari | `CHUNK_OVERLAP_TOKENS` (`chunking.py`) |
+| pragul de avertisment pentru `split=false` | `UNSPLIT_WARN_TOKENS` (`chunking.py`) |
+| instrucțiunile date modelului pentru întrebări | `PROMPT` (`questions.py`) |
+| câte întrebări maxim per chunk | `MAX_QUESTIONS` (`questions.py`) |
+
 ## Testare
 
 - Testele nu cheamă Gemini și nu au nevoie de Postgres:
@@ -188,3 +328,15 @@ fără să rulezi din nou testul real:**
   restructurat. Orice funcție cu forma asta poate înlocui Gemini.
 - Verificarea reală se face manual, pe un document mic, fără să atingi corpusul: cheamă
   `restructure(corp, titlu)` din Python și scrie rezultatul într-un folder temporar.
+- **Indexarea se testează la fel, cu fake-uri proprii** (`tests/index_fakes.py`):
+  `FakeVectors` (embeddings deterministe după lungimea textului, `replace_document` în
+  memorie, cu `fail="embed"` / `fail="write"` ca să simuleze un eșec la fiecare pas) și
+  `FakeQuestions` (întrebări deterministe, înregistrează apelurile primite). `index_document(...)`
+  primește `vectors=` și `questioner=` direct; `__main__.main(...)` primește și el `vectors=`
+  și `questioner=` (implicit `PgVectorIndex.from_settings()`, respectiv `generate_questions`
+  din `questions.py`) — dă-le fake în teste, la fel cum `converters=`/`restructurer=` se dau
+  fake pentru `prepare`. Helper-ul `run()` din `test_cli.py` face deja asta pentru `index`.
+- `test_vectors_pg.py` e integrare reală pe Postgres cu pgvector (ștergerea și refacerea
+  vectorilor unui document, filtrarea după `kind`): se sare automat dacă `.env` nu are o
+  bază care răspunde (`docker compose up -d db`), altfel creează un tabel propriu
+  `knowledge_vectors_test_<hex>` per test și îl șterge la final — nu atinge `knowledge_vectors`.
