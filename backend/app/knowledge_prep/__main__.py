@@ -1,4 +1,4 @@
-"""CLI-ul pipeline-ului de cunoștințe: register → prepare → review → (index) → validate, plus status.
+"""CLI-ul pipeline-ului de cunoștințe: register → prepare → review → index → validate, plus status.
 
 Rulare din backend/:
     uv run python -m app.knowledge_prep <comandă> <țintă> [opțiuni]
@@ -19,9 +19,12 @@ from sqlmodel import Session, col, select
 from app.knowledge_prep import registry
 from app.knowledge_prep.convert import CONVERTED_DIR
 from app.knowledge_prep.converters import CONVERTERS, Converter
+from app.knowledge_prep.index import index_document
 from app.knowledge_prep.models import Document, DocumentType, Stage
+from app.knowledge_prep.questions import QuestionGenerator, generate_questions
 from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
 from app.knowledge_prep.restructure import Restructurer, restructure
+from app.knowledge_prep.vectors import PgVectorIndex, VectorIndex
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("review", help="→ 'reviewed', salvează hash-ul").add_argument(
         "target"
     )
+
+    idx = sub.add_parser("index", help="chunking + întrebări + embeddings → 'indexed'")
+    idx.add_argument("target", help="id, slug sau cale")
+    idx.add_argument(
+        "--questions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="--no-questions: doar vectorii 'content' (baseline)",
+    )
+    idx.add_argument(
+        "--force",
+        action="store_true",
+        help="reindexează un document 'validated' (întrebările editate manual se pierd)",
+    )
+
     sub.add_parser("validate", help="→ 'validated'").add_argument("target")
     sub.add_parser("status", help="tabel cu documentele").add_argument(
         "target", nargs="?"
@@ -204,6 +222,35 @@ def _single(
     return 0
 
 
+def _index(
+    args: argparse.Namespace,
+    session: Session,
+    vectors: VectorIndex | None,
+    questioner: QuestionGenerator,
+) -> int:
+    try:
+        doc = registry.resolve(session, args.target)
+        report = index_document(
+            session,
+            doc,
+            vectors=vectors if vectors is not None else PgVectorIndex.from_settings(),
+            questioner=questioner if args.questions else None,
+            force=args.force,
+        )
+    except Exception as e:  # regulă încălcată sau pas eșuat (last_error e deja scris)
+        logger.error("EROARE %s: %s", args.target, e)
+        return 1
+    logger.info(
+        "%s: %s (%d chunk-uri, %d întrebări, %d avertismente)",
+        doc.slug,
+        doc.stage,
+        report.chunks,
+        report.questions,
+        len(report.warnings),
+    )
+    return 0
+
+
 def _status(args: argparse.Namespace, session: Session) -> int:
     if args.target:
         try:
@@ -235,6 +282,8 @@ def _dispatch(
     session: Session,
     converters: Mapping[str, Converter],
     restructurer: Restructurer,
+    vectors: VectorIndex | None,
+    questioner: QuestionGenerator,
     parser: argparse.ArgumentParser,
 ) -> int:
     match args.command:
@@ -244,6 +293,8 @@ def _dispatch(
             return _prepare(args, session, converters, restructurer)
         case "review":
             return _single(registry.review, args, session)
+        case "index":
+            return _index(args, session, vectors, questioner)
         case "validate":
             return _single(registry.validate, args, session)
         case _:
@@ -256,19 +307,23 @@ def main(
     session: Session | None = None,
     converters: Mapping[str, Converter] = CONVERTERS,
     restructurer: Restructurer = restructure,
+    vectors: VectorIndex | None = None,
+    questioner: QuestionGenerator = generate_questions,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    for noisy in ("httpx", "google_genai"):  # log-uri per request HTTP
+    for noisy in ("httpx", "google_genai", "openai"):  # log-uri per request HTTP
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     if session is not None:
-        return _dispatch(args, session, converters, restructurer, parser)
+        return _dispatch(
+            args, session, converters, restructurer, vectors, questioner, parser
+        )
     from app.core.db import engine  # doar la rulare reală: cere .env + Postgres
 
     with Session(engine) as s:
-        return _dispatch(args, s, converters, restructurer, parser)
+        return _dispatch(args, s, converters, restructurer, vectors, questioner, parser)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,9 @@ from sqlmodel import Session, select
 from app.knowledge_prep.__main__ import main
 from app.knowledge_prep.converters import Converter
 from app.knowledge_prep.models import Document, Stage
+from app.knowledge_prep.tests.index_fakes import FakeQuestions, FakeVectors
+
+MID = " ".join(["Grâul încolțit dă putere organismului slăbit."] * 10)
 
 
 def fake_converter(path: Path) -> str:
@@ -33,13 +36,18 @@ def fake_restructure(body: str, title: str) -> str:
 
 
 def run(
-    session: Session, *argv: str, converters: Mapping[str, Converter] = CONVERTERS
+    session: Session,
+    *argv: str,
+    converters: Mapping[str, Converter] = CONVERTERS,
+    vectors: FakeVectors | None = None,
 ) -> int:
     return main(
         list(argv),
         session=session,
         converters=converters,
         restructurer=fake_restructure,
+        vectors=vectors or FakeVectors(),
+        questioner=FakeQuestions(),
     )
 
 
@@ -202,3 +210,48 @@ def test_prepare_restructures_unless_no_restructure(session: Session, tmp_path: 
     converted = tmp_path / "baza" / "converted"
     assert (converted / "a.md").read_text().endswith("\n# a\n\nconținut din a.txt\n")
     assert (converted / "b.md").read_text().endswith("---\n\nconținut din b.txt\n")
+
+
+def test_index_flow_no_questions_then_force_after_validate(
+    session: Session, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    md = make_file(tmp_path, "carte.md", f"# Carte\n\n## A\n\n{MID}\n")
+    assert run(session, "register", str(md), "--structured") == 0
+    assert run(session, "index", "carte") == 1  # încă 'structured'
+    assert run(session, "review", "carte") == 0
+
+    vectors = FakeVectors()
+    assert run(session, "index", "carte", "--no-questions", vectors=vectors) == 0
+    assert {e.kind for e in vectors.rows.values()} == {"content"}
+    assert stages(session) == {"carte": Stage.indexed}
+
+    assert run(session, "validate", "carte") == 0
+    assert (
+        run(session, "index", "carte", vectors=vectors) == 1
+    )  # validated, fără --force
+    assert stages(session) == {"carte": Stage.validated}
+    assert run(session, "index", "carte", "--force", vectors=vectors) == 0
+    assert {e.kind for e in vectors.rows.values()} == {"content", "question"}
+
+    capsys.readouterr()
+    assert run(session, "status", "carte") == 0
+    last = capsys.readouterr().out.splitlines()[-1]
+    assert last.split() == [
+        "carte",
+        "carte",
+        "indexed",
+    ]  # fără avertismente, fără eroare
+
+
+def test_index_failure_returns_1_and_status_shows_error(
+    session: Session, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    md = make_file(tmp_path, "carte.md", f"# Carte\n\n{MID}\n")
+    run(session, "register", str(md), "--structured")
+    run(session, "review", "carte")
+
+    assert run(session, "index", "carte", vectors=FakeVectors(fail="embed")) == 1
+    capsys.readouterr()
+    run(session, "status")
+    assert "RuntimeError: OpenAI căzut" in capsys.readouterr().out
+    assert stages(session) == {"carte": Stage.reviewed}
