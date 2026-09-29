@@ -8,31 +8,11 @@ from collections.abc import Iterator
 
 import pytest
 from langchain_core.embeddings import DeterministicFakeEmbedding
-from sqlalchemy import create_engine, text
 
+from app.knowledge_prep.tests.pg import PG_URL, drop_table, requires_pg
 from app.knowledge_prep.vectors import PgVectorIndex, VectorEntry
 
-
-def _pg_url() -> str | None:
-    try:
-        from app.core.config import settings
-
-        url = str(settings.DATABASE_URL)
-        engine = create_engine(url)
-        try:
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-        finally:
-            engine.dispose()
-        return url
-    except Exception:
-        return None
-
-
-PG_URL = _pg_url()
-pytestmark = pytest.mark.skipif(
-    PG_URL is None, reason="Postgres cu pgvector indisponibil (docker compose up -d db)"
-)
+pytestmark = requires_pg
 SIZE = 8
 
 
@@ -51,10 +31,7 @@ def pg() -> Iterator[PgVectorIndex]:
     assert PG_URL is not None
     table = f"knowledge_vectors_test_{uuid.uuid4().hex[:8]}"
     yield make_index(table)
-    engine = create_engine(PG_URL)
-    with engine.begin() as conn:
-        conn.execute(text(f'DROP TABLE IF EXISTS "{table}"'))
-    engine.dispose()
+    drop_table(table)
 
 
 def entries_for(document_id: uuid.UUID, n_chunks: int = 2) -> list[VectorEntry]:
