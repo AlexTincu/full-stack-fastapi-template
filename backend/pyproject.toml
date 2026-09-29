@@ -31,6 +31,7 @@ dependencies = [
     "langchain-postgres>=0.0.18",
     "google-genai>=2.8.0",
     "pypdf>=6.19.0",
+    "langchain-classic>=1.0.8",
 ]
 
 [dependency-groups]
