@@ -45,7 +45,13 @@ class ChunkBM25:
         return cls([str(i) for i, _ in rows], [t for _, t in rows])
 
     def search(self, query: str, k: int) -> list[str]:
-        """Cele mai bune `k` chunk-uri cu scor pozitiv (niciun cuvânt comun → listă goală)."""
+        """Cele mai bune `k` chunk-uri cu scor pozitiv.
+
+        Listă goală doar când query-ul nu are niciun token comun cu corpusul (ex. cuvinte
+        absente din toate chunk-urile). Pe un corpus real, IDF-ul negativ e limitat la
+        `epsilon * average_idf` (pozitiv), deci cuvintele comune tot primesc scor > 0 — nu
+        „niciun cuvânt comun (semnificativ)”, ci literalmente niciun token în comun.
+        """
         tokens = tokenize(query)
         if self._bm25 is None or not tokens:
             return []

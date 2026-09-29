@@ -9,7 +9,6 @@
 Evaluarea, rescrierea query-ului și reranking-ul nu sunt aici (vin după evaluare).
 """
 
-import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -30,8 +29,6 @@ from app.knowledge_prep.converters.gemini import log_retry
 from app.knowledge_prep.docstore import Bind, ChunkDocStore
 from app.knowledge_prep.lexical import ChunkBM25
 from app.knowledge_prep.questions import MAX_QUESTIONS
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_K = 5
 RRF_K = 60  # constanta din articolul RRF (și din rag_simple)

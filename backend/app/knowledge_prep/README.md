@@ -387,9 +387,17 @@ Motiv: utilizatorii scriu des fără diacritice, iar unele texte vechi din corpu
   singură dată, din tot ce era în DB la acel moment. CLI-ul `search` îl reface la fiecare
   rulare, deci pentru el nu e o problemă; un proces de durată (server, agent) ar avea nevoie
   să-l reconstruiască periodic — decizie lăsată pentru faza 5 (întrebarea deschisă 2 din plan).
-- **Un cuvânt prezent în cel puțin jumătate din chunk-uri are scor BM25 ≤ 0** (particularitatea
-  formulei IDF din BM25): irelevant pe corpusul real (mii de chunk-uri diverse), dar vizibil în
-  teste mici cu corpus sintetic (câteva chunk-uri, cuvinte repetate).
+- **Fără stopwords, cuvintele comune primesc scor BM25 mic dar pozitiv pe corpusul real, nu ≤ 0.**
+  `BM25Okapi` limitează IDF-ul negativ la `epsilon * average_idf` (epsilon implicit 0.25 în
+  `rank_bm25`), iar media IDF e pozitivă pe un corpus real (mii de chunk-uri diverse) — un cuvânt
+  ca „la”/„ce”/„de”, prezent în peste jumătate din chunk-uri, ia acest prag pozitiv în loc de un
+  IDF negativ. Cum `tokenize` (mai sus) nu elimină stopwords, aproape orice întrebare în română
+  umple lista de candidați BM25 (`k * CHILDREN_PER_CHUNK`) cu potriviri slabe, care intră în RRF
+  cu aceeași pondere de rang ca potrivirile puternice — explicația probabilă pentru chunk-urile
+  mari și generice (`heading_path` = titlul documentului) din „Rezultate reale” mai jos. Scorul
+  ≤ 0 apare doar pe corpusuri mici/sintetice (ex. teste), unde media IDF poate fi negativă.
+  Eliminarea stopwords rămâne amânată pentru faza de evaluare (întrebarea deschisă 1 din plan) —
+  nu e o schimbare de comportament aici, doar o corectare a explicației.
 - **Documentele readuse în `structured`** (`prepare --force`) rămân căutabile până la
   următorul `index`: retrieval-ul nu filtrează după stadiu, doar citește `chunk` și
   `knowledge_vectors` cum sunt (spec, „Stadii” — chunk-urile și vectorii unui document rămân
