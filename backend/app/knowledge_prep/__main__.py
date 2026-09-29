@@ -1,4 +1,4 @@
-"""CLI-ul pipeline-ului de cunoștințe: register → prepare → review → index → validate, plus status.
+"""CLI-ul pipeline-ului de cunoștințe: register → prepare → review → index → validate, plus status și search.
 
 Rulare din backend/:
     uv run python -m app.knowledge_prep <comandă> <țintă> [opțiuni]
@@ -14,6 +14,7 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
+from langchain_core.vectorstores import VectorStore
 from sqlmodel import Session, col, select
 
 from app.knowledge_prep import registry
@@ -24,9 +25,19 @@ from app.knowledge_prep.models import Document, DocumentType, Stage
 from app.knowledge_prep.questions import QuestionGenerator, generate_questions
 from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
 from app.knowledge_prep.restructure import Restructurer, restructure
+from app.knowledge_prep.retrieval import DEFAULT_K, build_retriever
 from app.knowledge_prep.vectors import PgVectorIndex, VectorIndex
 
 logger = logging.getLogger(__name__)
+
+SNIPPET_CHARS = 200
+
+
+def _positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"trebuie să fie cel puțin 1 (primit {n})")
+    return n
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -97,6 +108,26 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("validate", help="→ 'validated'").add_argument("target")
     sub.add_parser("status", help="tabel cu documentele").add_argument(
         "target", nargs="?"
+    )
+
+    srch = sub.add_parser(
+        "search", help="caută chunk-uri pentru o întrebare (verificare manuală)"
+    )
+    srch.add_argument("query", help="întrebarea, între ghilimele")
+    srch.add_argument(
+        "-k", type=_positive_int, default=DEFAULT_K, help="câte chunk-uri (implicit 5)"
+    )
+    srch.add_argument(
+        "--questions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="--no-questions: doar vectorii 'content' (baseline)",
+    )
+    srch.add_argument(
+        "--hybrid",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="--no-hybrid: fără BM25",
     )
     return p
 
@@ -257,6 +288,39 @@ def _index(
     return 0
 
 
+def _search(
+    args: argparse.Namespace, session: Session, vectorstore: VectorStore | None
+) -> int:
+    query = args.query.strip()
+    if not query:
+        logger.error("EROARE: întrebarea e goală")
+        return 1
+    try:
+        retriever = build_retriever(
+            vectorstore
+            if vectorstore is not None
+            else PgVectorIndex.from_settings().store,
+            session.get_bind(),
+            k=args.k,
+            questions=args.questions,
+            hybrid=args.hybrid,
+        )
+        docs = retriever.invoke(query)
+    except Exception as e:
+        logger.exception("EROARE: %s", e)
+        return 1
+    if not docs:
+        sys.stdout.write("niciun rezultat\n")
+        return 0
+    for i, d in enumerate(docs, 1):
+        m = d.metadata
+        snippet = " ".join(d.page_content.split())[:SNIPPET_CHARS]
+        sys.stdout.write(
+            f"{i}. {m['slug']} — {' > '.join(m['heading_path'])}\n   {snippet}\n"
+        )
+    return 0
+
+
 def _status(args: argparse.Namespace, session: Session) -> int:
     if args.target:
         try:
@@ -290,6 +354,7 @@ def _dispatch(
     restructurer: Restructurer,
     vectors: VectorIndex | None,
     questioner: QuestionGenerator,
+    vectorstore: VectorStore | None,
     parser: argparse.ArgumentParser,
 ) -> int:
     match args.command:
@@ -303,6 +368,8 @@ def _dispatch(
             return _index(args, session, vectors, questioner)
         case "validate":
             return _single(registry.validate, args, session)
+        case "search":
+            return _search(args, session, vectorstore)
         case _:
             return _status(args, session)
 
@@ -315,6 +382,7 @@ def main(
     restructurer: Restructurer = restructure,
     vectors: VectorIndex | None = None,
     questioner: QuestionGenerator = generate_questions,
+    vectorstore: VectorStore | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -324,12 +392,21 @@ def main(
 
     if session is not None:
         return _dispatch(
-            args, session, converters, restructurer, vectors, questioner, parser
+            args,
+            session,
+            converters,
+            restructurer,
+            vectors,
+            questioner,
+            vectorstore,
+            parser,
         )
     from app.core.db import engine  # doar la rulare reală: cere .env + Postgres
 
     with Session(engine) as s:
-        return _dispatch(args, s, converters, restructurer, vectors, questioner, parser)
+        return _dispatch(
+            args, s, converters, restructurer, vectors, questioner, vectorstore, parser
+        )
 
 
 if __name__ == "__main__":
