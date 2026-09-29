@@ -250,6 +250,12 @@ Modul nou (numele se stabilește în planul fazei 4), fără modificări în `ra
   întrebări de test, rulate pe baseline și pe multi-vector. Setul de test nou vine din
   faza separată de extragere a întrebărilor (decizia 10).
 
+> **Implementat (2026-09-29) — doar retrieval-ul; evaluarea rămâne pentru după setul de
+> întrebări de test.** Modulele: `docstore.py`, `lexical.py`, `retrieval.py` în
+> `knowledge_prep`. Hibridul folosește BM25 cu `rank_bm25`, în memorie, peste `chunk.text`,
+> fără diacritice (nu `hybrid_search_config`: acela lucrează pe copii, cu `ts_rank` și sumă
+> ponderată). Detalii: `backend/app/knowledge_prep/README.md`.
+
 ## REST (faza 5)
 
 Rute în `app/api/routes/knowledge.py`, protejate ca rutele existente de superuser, care
@@ -274,7 +280,7 @@ Fiecare fază are propriul plan și e utilizabilă singură:
 2. **Restructurarea:** `restructure.py` și integrarea în `prepare`. ✅ 2026-09-28
 3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`). ✅ 2026-09-28 (verificare reală în așteptare)
 4. **Retrieval + evaluare:** `ChunkDocStore`, `MultiVectorRetriever`, BM25, comparația
-   baseline vs. multi-vector.
+   baseline vs. multi-vector. ✅ retrieval 2026-09-29 (evaluarea în așteptare)
 5. **REST.**
 
 ## Testare

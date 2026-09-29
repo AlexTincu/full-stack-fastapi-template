@@ -10,7 +10,8 @@ RAG.
 - **Cum s-a implementat, pas cu pas:** planurile din
   [`docs/superpowers/plans/`](../../../docs/superpowers/plans/) (`2026-09-26-knowledge-registry-plan.md`
   pentru faza 1, `2026-09-28-knowledge-restructure-plan.md` pentru faza 2,
-  `2026-09-28-knowledge-index-plan.md` pentru faza 3).
+  `2026-09-28-knowledge-index-plan.md` pentru faza 3,
+  `2026-09-29-knowledge-retrieval-plan.md` pentru faza 4 (doar retrieval, fără evaluare)).
 - **Acest README:** cum funcționează codul azi, de ce arată așa și ce trebuie știut înainte de
   a-l modifica.
 
@@ -21,7 +22,7 @@ RAG.
 | 1 | Registrul: `register`, `prepare` (doar conversie), `review`, `validate`, `status` | ✅ |
 | 2 | Restructurarea cu Gemini, în `prepare` | ✅ (2026-09-28) |
 | 3 | Indexarea: chunking, întrebări, `knowledge_vectors`, `index` | ✅ (2026-09-28, verificare reală în așteptare) |
-| 4 | Retrieval + evaluare | următoarea |
+| 4 | Retrieval + evaluare | retrieval ✅ (2026-09-29), evaluarea în așteptare |
 | 5 | REST | — |
 
 ## Fluxul
@@ -53,6 +54,7 @@ uv run python -m app.knowledge_prep prepare <id|slug|cale|folder> [--force] [--r
 uv run python -m app.knowledge_prep review|validate <id|slug|cale>
 uv run python -m app.knowledge_prep index <id|slug|cale> [--no-questions] [--force]
 uv run python -m app.knowledge_prep status [<țintă>]
+uv run python -m app.knowledge_prep search "<întrebare>" [-k N] [--no-questions] [--no-hybrid]
 
 uv run pytest app/knowledge_prep                            # fără Postgres și fără Gemini
 uv run ruff check app/knowledge_prep && uv run ty check app/knowledge_prep
@@ -60,7 +62,8 @@ uv run ruff check app/knowledge_prep && uv run ty check app/knowledge_prep
 
 Ai nevoie de `GEMINI_API_KEY` și `GEMINI_MODEL` în `full-stack-fastapi-template/.env`. `index`
 are nevoie și de `OPENAI_API_KEY` (embeddings, `text-embedding-3-large`), pe lângă cheile Gemini
-(întrebările, dacă nu rulezi cu `--no-questions`).
+(întrebările, dacă nu rulezi cu `--no-questions`). `search` are nevoie doar de `OPENAI_API_KEY`
+(embedding-ul întrebării).
 
 ## Harta modulului
 
@@ -78,6 +81,11 @@ are nevoie și de `OPENAI_API_KEY` (embeddings, `text-embedding-3-large`), pe l�
 | `vectors.py` | `PgVectorIndex` / `VectorEntry`: tabelul `knowledge_vectors`, embeddings OpenAI (faza 3) |
 | `index.py` | `index_document`: orchestrează chunking + întrebări + vectori într-un pas (faza 3) |
 | `tests/index_fakes.py` | `FakeVectors`, `FakeQuestions` — fake-urile injectate în testele fazei 3 |
+| `docstore.py` | `ChunkDocStore`: părintele `MultiVectorRetriever` peste tabelul `chunk`, doar-citire (faza 4) |
+| `lexical.py` | `tokenize`, `ChunkBM25`: index BM25 în memorie peste `chunk.text` (faza 4) |
+| `retrieval.py` | `build_retriever`, `KnowledgeRetriever`, `reciprocal_rank_fusion`: multi-vector, baseline, hibrid (faza 4) |
+| `tests/retrieval_fakes.py` | `add_document`, `child`, `FakeChildStore` — fake-urile injectate în testele de retrieval |
+| `tests/pg.py` | `PG_URL`, `requires_pg`, `has_table`, `drop_table` — conexiunea Postgres pentru testele de integrare (`test_vectors_pg.py`, `test_retrieval_pg.py`) |
 
 ## Restructurarea (`restructure.py`)
 
@@ -314,6 +322,114 @@ README._
 | instrucțiunile date modelului pentru întrebări | `PROMPT` (`questions.py`) |
 | câte întrebări maxim per chunk | `MAX_QUESTIONS` (`questions.py`) |
 
+## Retrieval (`docstore.py`, `lexical.py`, `retrieval.py`)
+
+### Ce rezolvă
+
+Transformă indexul fazei 3 (`chunk`, `knowledge_vectors`) într-un retriever gata de folosit:
+top `k` chunk-uri pentru o întrebare, ca `Document`-uri cu metadatele din `ChunkDocStore`.
+Patru combinații, prin cele două opțiuni ortogonale ale lui
+`build_retriever(vectorstore, bind, *, k=DEFAULT_K, questions=True, hybrid=True)`:
+
+| `questions` | `hybrid` | Ce caută |
+|---|---|---|
+| `True` | `True` | multi-vector (`content` + întrebări) + BM25, combinate prin RRF |
+| `True` | `False` | doar multi-vector |
+| `False` | `True` | baseline (doar `content`) + BM25, combinate prin RRF |
+| `False` | `False` | doar baseline |
+
+`build_retriever` e singurul punct de intrare pentru cod (evaluarea din faza 4, REST-ul din
+faza 5, un viitor agent) — nu construi `KnowledgeRetriever` direct.
+
+### Cum funcționează
+
+1. **Semantic:** `MultiVectorRetriever(vectorstore=..., docstore=ChunkDocStore(bind), id_key="doc_id")`
+   caută în `knowledge_vectors` (copiii `content`/`question`) și reduce rezultatele la
+   părinți (chunk-uri) după `doc_id`. `search_kwargs["k"] = k * CHILDREN_PER_CHUNK`, cu
+   `CHILDREN_PER_CHUNK = MAX_QUESTIONS + 1 = 6`: un chunk poate avea un vector `content` și
+   până la 5 întrebări, deci cerând de 6 ori mai mulți copii decât `k`, rămân cel puțin `k`
+   părinți distincți chiar dacă toți copiii găsiți s-ar grupa în chunk-uri complete. Baseline =
+   același retriever, cu `search_kwargs["filter"] = {"kind": "content"}` (sar peste întrebări).
+2. **`ChunkDocStore(bind)`** e părintele `MultiVectorRetriever`: doar-citire peste tabelul
+   `chunk` (`mget` face un join cu `document`; `mset`/`mdelete` ridică `NotImplementedError`,
+   scrierea se face doar prin `index`). Acceptă chei `str` **și** `uuid.UUID`, pentru că
+   `PGVectorStore` pune `doc_id` în metadatele copiilor ca `uuid.UUID` (coloana e `UUID`), iar
+   `MultiVectorRetriever` i-l dă neschimbat lui `mget`; testele și CLI-ul folosesc `str`.
+3. **Lexical (`ChunkBM25.from_db`):** un index `rank_bm25.BM25Okapi` construit o dată, în
+   memorie, din `chunk.text` al **tuturor** chunk-urilor din DB (nu din copiii `content`, ca
+   textul embedded, ci din textul brut al chunk-ului).
+4. **Hibrid:** listele semantică și lexicală (id-uri de `chunk`) se combină prin
+   `reciprocal_rank_fusion` pe `chunk.id`, cu `RRF_K = 60` (constanta din articolul RRF, ca în
+   `rag_simple`); la egalitate câștigă ordinea din lista semantică. Rezultatul final se citește
+   prin `ChunkDocStore.mget` și se trunchiază la `k`.
+
+### De ce BM25 cu `rank_bm25`, nu `hybrid_search_config`
+
+`PGVectorStore` are propria căutare hibridă (`hybrid_search_config`), dar lucrează pe **copii**,
+nu pe chunk-uri: full-text Postgres (`ts_rank`) pe coloana `content` a lui `knowledge_vectors`,
+cu fuziune printr-o sumă ponderată de scoruri normalizate, **înainte** de reducerea la părinți —
+un chunk cu 5 întrebări ar fi favorizat de 6 ori față de unul fără, iar spec-ul cere RRF pe
+`chunk.id`. Ar cere și o coloană `tsvector` + index GIN pe un tabel creat de `PGEngine` (nu de
+Alembic), plus o configurație românească fără diacritice (`unaccent`) — o migrare nouă pentru un
+corpus care azi are câteva zeci de chunk-uri. `rank_bm25` în memorie e suficient de rapid la
+această dimensiune și e deja dependență directă (folosit și de `rag_simple`).
+
+**Tokenizarea** (`tokenize`, `lexical.py`): literele mici, NFKD, fără semnele combinante
+(`ă→a`, `â`/`î→a`/`i`, `ș`/`ş→s`, `ț`/`ţ→t`), apoi `\w+`. Aceeași funcție pe corpus și pe query.
+Motiv: utilizatorii scriu des fără diacritice, iar unele texte vechi din corpus au sedilă
+(`ş`/`ţ`) în loc de virgulă.
+
+### Limitări cunoscute
+
+- **Fără stemming:** `grâu` ≠ `grâul` la BM25 (partea semantică acoperă formele flexionate; se
+  reevaluează după evaluare — vezi întrebarea deschisă 1 din plan).
+- **Indexul BM25 nu vede chunk-uri noi până la un nou `build_retriever`:** se construiește o
+  singură dată, din tot ce era în DB la acel moment. CLI-ul `search` îl reface la fiecare
+  rulare, deci pentru el nu e o problemă; un proces de durată (server, agent) ar avea nevoie
+  să-l reconstruiască periodic — decizie lăsată pentru faza 5 (întrebarea deschisă 2 din plan).
+- **Un cuvânt prezent în cel puțin jumătate din chunk-uri are scor BM25 ≤ 0** (particularitatea
+  formulei IDF din BM25): irelevant pe corpusul real (mii de chunk-uri diverse), dar vizibil în
+  teste mici cu corpus sintetic (câteva chunk-uri, cuvinte repetate).
+- **Documentele readuse în `structured`** (`prepare --force`) rămân căutabile până la
+  următorul `index`: retrieval-ul nu filtrează după stadiu, doar citește `chunk` și
+  `knowledge_vectors` cum sunt (spec, „Stadii” — chunk-urile și vectorii unui document rămân
+  neatinși până la o nouă indexare).
+- **Fără filtrare după stadiul documentului**, în general: un document `reviewed` neindexat nu
+  are chunk-uri, deci nu apare; unul `indexed`/`validated` apare mereu, indiferent de stadiu.
+
+### Rezultate reale (2026-09-29)
+
+Verificare pe corpusul real (Postgres + OpenAI), un singur document indexat la acel moment
+(`orele-de-refacere-ale-organelor`, 36 chunk-uri, 178 vectori; `graul-incoltit-valeriu-popa` era
+`reviewed`, neindexat). Toate cele 4 combinații rulează cap-coadă fără erori; căutarea fără
+diacritice merge.
+
+- **Q1** „La ce ora lucreaza cel mai intens ficatul?” (fără diacritice), `-k 3`: toate cele 4
+  moduri pun pe #1 secțiunea corectă („Vezica biliară și ficatul”); modurile diferă doar la
+  #2/#3. Hibridul (baseline+BM25, multi+BM25) aduce și chunk-uri cu `heading_path` egal cu
+  titlul documentului (text dinaintea primului titlu / bucăți dintr-o secțiune mare) — un semn
+  că BM25 pe `chunk.text` favorizează uneori chunk-uri mari, generice.
+- **Q2** „Când e bine să mergi la toaletă dimineața?”, `-k 3`: baseline și baseline+BM25 pun pe
+  #1 secțiunea cea mai relevantă (intestinul gros, ORELE 05-07); la multi-vector, aceeași
+  secțiune iese din top 3; la multi+BM25 apare pe #2. Pe acest document diferențele dintre
+  moduri sunt mici și nu arată încă un câștig clar al multi-vector.
+- Fără document care să conțină „grâul încolțit” în corpusul indexat la acel moment: întrebarea
+  respectivă din plan a întors doar chunk-uri irelevante din singurul document indexat —
+  comportament corect (nu există prag de relevanță, retriever-ul întoarce mereu top `k`), dar
+  nu verifică nimic.
+- Concluziile despre baseline vs. multi-vector vin doar din evaluare, cu un set de întrebări de
+  test și un corpus mai mare (inclusiv cărți indexate). Zgomot: fiecare rulare CLI afișează pe
+  stderr avertismentul `from pydantic.v1 import BaseModel` (dintr-o bibliotecă, preexistent).
+
+### Cum se reglează
+
+| Vrei să… | Modifici |
+|---|---|
+| câte chunk-uri implicit | `DEFAULT_K` (`retrieval.py`) |
+| câți copii candidați per chunk cerut | `CHILDREN_PER_CHUNK` (`retrieval.py`; legat de `MAX_QUESTIONS` din `questions.py`) |
+| cât de repede scade greutatea unui rang mai slab la RRF | `RRF_K` (`retrieval.py`) |
+| tokenizarea BM25 (stemming, stopwords) | `tokenize` (`lexical.py`) |
+
 ## Testare
 
 - Testele nu cheamă Gemini și nu au nevoie de Postgres:
@@ -340,3 +456,20 @@ README._
   vectorilor unui document, filtrarea după `kind`): se sare automat dacă `.env` nu are o
   bază care răspunde (`docker compose up -d db`), altfel creează un tabel propriu
   `knowledge_vectors_test_<hex>` per test și îl șterge la final — nu atinge `knowledge_vectors`.
+  Helper-ul de conexiune (`PG_URL`, `requires_pg`, `has_table`, `drop_table`) e în `tests/pg.py`,
+  comun cu `test_retrieval_pg.py`.
+- **Retrieval-ul se testează cu fake-uri proprii** (`tests/retrieval_fakes.py`): `add_document`
+  scrie un document `indexed` cu chunk-urile date direct în tabelul `chunk` (SQLite in-memory);
+  `FakeChildStore` simulează `PGVectorStore` — întoarce copiii într-o ordine fixă (primul = cel
+  mai apropiat, indiferent de query) și aplică filtrul (`{"kind": "content"}`) prin egalitate
+  simplă pe metadate, ca `PGVectorStore`; înregistrează fiecare apel (`query`, `k`, `filter`) în
+  `store.calls`, pentru teste care verifică ce a cerut `MultiVectorRetriever`.
+- **`__main__.main(...)` primește și `vectorstore=`** (implicit `None` → `PgVectorIndex.from_settings().store`
+  la rulare reală): dă-l fake în teste (`FakeChildStore`), la fel cum `vectors=`/`questioner=` se
+  dau fake pentru `index`. Helper-ul `run()` din `test_cli.py` face deja asta.
+- `test_retrieval_pg.py` e integrare reală pe Postgres: scrie un document `retrieval-test-<hex>`
+  direct în tabelele reale `document`/`chunk` (prin `add_document`) și îl șterge la final
+  (`ON DELETE CASCADE` pentru chunk-uri), plus un tabel propriu `knowledge_vectors_test_<hex>`
+  pentru vectori (șters la final) — nu atinge `knowledge_vectors`. Acoperă `ChunkDocStore` pe
+  rânduri Postgres reale, `ChunkBM25.from_db`, și `build_retriever` cap-coadă (multi-vector,
+  baseline, hibrid) cu `DeterministicFakeEmbedding` în loc de OpenAI.
