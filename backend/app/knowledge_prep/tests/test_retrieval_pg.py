@@ -90,7 +90,7 @@ def index(chunks: list[Chunk]) -> Iterator[PgVectorIndex]:
     entries.append(
         VectorEntry(uuid.uuid4(), chunks[1].id, document_id, "question", QUESTION)
     )
-    idx.replace_document(document_id, entries, idx.embed([e.text for e in entries]))
+    idx.add(entries, idx.embed([e.text for e in entries]))
     try:
         yield idx
     finally:

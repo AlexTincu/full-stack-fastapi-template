@@ -9,6 +9,7 @@ se lipesc de următoarea din același părinte, cele mari se taie cu `RecursiveC
 mari nu s-ar mai putea tăia la granițe de paragraf.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass
 from functools import cache
@@ -45,6 +46,11 @@ def count_tokens(text: str) -> int:
 def embedding_text(heading_path: list[str], text: str) -> str:
     """Textul embedded pentru vectorul `content`: calea de titluri, rând gol, chunk-ul."""
     return f"{' > '.join(heading_path)}\n\n{text}"
+
+
+def chunk_hash(heading_path: list[str], text: str) -> str:
+    """sha256 pe `embedding_text`: același hash = același vector `content` (migrarea 3e8d5a1f4c27 îl copiază)."""
+    return hashlib.sha256(embedding_text(heading_path, text).encode()).hexdigest()
 
 
 def _strip_verify_markers(body: str) -> str:

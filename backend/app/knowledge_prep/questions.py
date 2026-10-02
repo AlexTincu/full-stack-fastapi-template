@@ -22,18 +22,23 @@ MAX_QUESTIONS = 5
 
 PROMPT = """Primești un fragment dintr-un text în limba română din corpusul „Calea de Autovindecare” (cărți, regimuri alimentare, note și transcrieri despre vindecarea naturală).
 
-Scrie între 1 și 5 întrebări la care fragmentul răspunde complet. Reguli:
-1. Întrebările sunt în limba română, formulate cum ar întreba un om care caută informația, nu copiate din text.
-2. Fiecare întrebare se înțelege singură, fără context: numește explicit subiectul (ex. „grâul încolțit”, „regimul pentru anemie”), niciodată „acesta”, „textul”, „autorul” sau „fragmentul”.
-3. Răspunsul complet la fiecare întrebare se găsește în fragment. Nu pune întrebări la care fragmentul răspunde doar parțial.
-4. Întrebările sunt diferite între ele și acoperă ideile principale. Mai bine mai puține și bune decât multe și slabe.
-5. Nu adăuga informații care nu sunt în fragment.
+Scrie între 1 și 5 întrebări pe care un om le-ar pune unui asistent și pentru care fragmentul e o sursă bună de răspuns. Omul de obicei nu știe ce conține corpusul: pornește de la problema lui sau de la un subiect despre care a auzit vag. Scrie, în această ordine:
+1. Întrebări pornind de la problemă (1-2), dacă fragmentul spune la ce ajută ceva: formulate de cineva care NU cunoaște remediul, fără să-l numească (ex. „Ce ajută la probleme ale sistemului nervos?”, „Ce pot face pentru colesterolul mare?”).
+2. O întrebare de ansamblu despre subiectul fragmentului, cu subiectul numit (ex. „Care sunt beneficiile grâului încolțit?”, „Cât grâu încolțit se consumă zilnic?”).
+3. Întrebări de detaliu (0-2), doar pentru idei cu adevărat diferite de cele de mai sus. Nu împărți aceeași idee în variante (pe vârste, doze, etape, afecțiuni înrudite).
+
+Reguli:
+- Limba română, cuvinte simple, cum vorbește un om, nu copiate din text.
+- Fiecare întrebare se înțelege singură: niciodată „acesta”, „textul”, „autorul” sau „fragmentul”.
+- Fragmentul trebuie să conțină un răspuns relevant la întrebare, chiar dacă nu singurul posibil.
+- Nu adăuga informații care nu sunt în fragment. Mai bine mai puține și bune decât multe și slabe.
+- O singura intrebare poate fi de ajuns, dacă fragmentul nu are mai multe idei diferite.
 """
 
 
 class GeneratedQuestions(BaseModel):
     questions: list[str] = Field(
-        description="1-5 întrebări în limba română, la care fragmentul răspunde complet"
+        description="1-5 întrebări în limba română, pentru care fragmentul e o sursă bună de răspuns"
     )
 
 

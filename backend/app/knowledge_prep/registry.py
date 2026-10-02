@@ -7,6 +7,7 @@ Regulile încălcate ridică `RegistryError` fără să atingă registrul; doar 
 """
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -30,6 +31,8 @@ from app.knowledge_prep.models import Document, DocumentType, Stage
 from app.knowledge_prep.restructure import Restructurer
 from app.knowledge_prep.restructure import restructure as restructure_markdown
 from app.models import get_datetime_utc
+
+logger = logging.getLogger(__name__)
 
 UNSPLIT_TYPES = {DocumentType.regim, DocumentType.nota, DocumentType.insight}
 
@@ -61,24 +64,80 @@ def default_split(doc_type: DocumentType) -> bool:
     return doc_type not in UNSPLIT_TYPES
 
 
-def _add(session: Session, doc: Document) -> Document:
-    # identitatea fișierului: originalul, dacă există; altfel markdown-ul
-    if doc.original_path:
-        same_file = col(Document.original_path) == doc.original_path
+def _same_file(session: Session, doc: Document) -> Document | None:
+    """Rândul aceluiași fișier, oricum ar fi fost înregistrat (original sau markdown structurat)."""
+    if doc.stage == Stage.uploaded:
+        paths = [doc.original_path]  # markdown-ul e doar planificat, nu există încă
     else:
-        same_file = col(Document.markdown_path) == doc.markdown_path
-    existing = session.exec(select(Document).where(same_file)).first()
-    if existing:
-        raise AlreadyRegistered(
-            f"deja înregistrat ca '{existing.slug}' ({existing.stage})"
+        paths = [p for p in (doc.original_path, doc.markdown_path) if p]
+    found = session.exec(
+        select(Document).where(
+            or_(
+                col(Document.original_path).in_(paths),
+                col(Document.markdown_path).in_(paths),
+            )
         )
+    ).all()
+    if len(found) > 1:
+        raise RegistryError(
+            f"{doc.original_path or doc.markdown_path} apare în mai multe documente "
+            f"({', '.join(d.slug for d in found)}); șterge-le pe cele greșite."
+        )
+    return found[0] if found else None
+
+
+def _add(session: Session, doc: Document) -> Document:
+    """Inserează documentul sau, dacă fișierul e deja înregistrat, îl actualizează.
+
+    Reînregistrarea cu alte opțiuni lasă rândul exact ca o înregistrare nouă cu aceleași opțiuni
+    (păstrând id-ul). Cu aceleași opțiuni → `AlreadyRegistered` (se sare).
+    Stadiul: dacă se schimbă markdown-ul (original ↔ structurat, alt slug) se ia de la capăt;
+    altfel (tip, split, titlu, autor) scade cel mult la `reviewed`, pentru reindexare.
+    """
+    existing = _same_file(session, doc)
     taken = session.exec(select(Document).where(Document.slug == doc.slug)).first()
-    if taken:
+    if taken and taken is not existing:
         raise RegistryError(
             f"slug '{doc.slug}' e deja folosit de "
             f"{taken.original_path or taken.markdown_path}; alege alt --title."
         )
-    session.add(doc)
+    if existing is None:
+        session.add(doc)
+    else:
+        fields = (
+            "slug",
+            "title",
+            "author",
+            "type",
+            "split",
+            "original_path",
+            "markdown_path",
+        )
+        changed = [f for f in fields if getattr(existing, f) != getattr(doc, f)]
+        if not changed:
+            raise AlreadyRegistered(
+                f"deja înregistrat ca '{existing.slug}' ({existing.stage}), cu aceleași opțiuni"
+            )
+        logger.info(
+            "reînregistrat %s: %s",
+            existing.slug,
+            ", ".join(
+                f"{f} {getattr(existing, f)} → {getattr(doc, f)}" for f in changed
+            ),
+        )
+        for f in changed:
+            setattr(existing, f, getattr(doc, f))
+        if (
+            "markdown_path" in changed
+        ):  # alt markdown: stadiul și hash-urile vechi nu mai contează
+            existing.stage = doc.stage
+            existing.reviewed_hash = None
+            existing.indexed_hash = None
+        elif existing.stage.rank > Stage.reviewed.rank:
+            existing.stage = Stage.reviewed  # chunk-urile vechi rămân până la `index`
+        existing.last_error = None
+        existing.updated_at = get_datetime_utc()
+        doc = existing
     session.commit()
     session.refresh(doc)
     return doc
@@ -189,9 +248,9 @@ def record_step(session: Session, doc: Document) -> Iterator[None]:
     """Un pas eșuat scrie `last_error` și nu schimbă stadiul; unul reușit golește `last_error`."""
     try:
         yield
-    except Exception as e:
+    except (Exception, KeyboardInterrupt) as e:  # și oprirea manuală din notebook
         session.rollback()  # expiră obiectele: modificările făcute în pas se pierd
-        doc.last_error = f"{type(e).__name__}: {e}"
+        doc.last_error = f"{type(e).__name__}: {str(e) or 'întrerupt'}"
         doc.updated_at = get_datetime_utc()
         session.add(doc)
         session.commit()

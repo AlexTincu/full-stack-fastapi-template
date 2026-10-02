@@ -1,3 +1,4 @@
+import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -6,6 +7,7 @@ import pytest
 from langchain_core.vectorstores import VectorStore
 from sqlmodel import Session, select
 
+from app.knowledge_prep import evaluation
 from app.knowledge_prep.__main__ import main
 from app.knowledge_prep.converters import Converter
 from app.knowledge_prep.models import Document, Stage
@@ -322,7 +324,10 @@ def test_search_prints_ranked_chunks(
     store = FakeChildStore.from_entries(indexed_book(session, tmp_path).rows.values())
     capsys.readouterr()
 
-    assert run(session, "search", "zxqvortex", "-k", "2", vectorstore=store) == 0
+    assert (
+        run(session, "search", "zxqvortex", "-k", "2", "--no-expand", vectorstore=store)
+        == 0
+    )
 
     out = capsys.readouterr().out
     # Orzul e și în lista semantică, și singurul hit BM25: primul după RRF
@@ -330,6 +335,20 @@ def test_search_prints_ranked_chunks(
     assert "2. carte — Carte > " in out
     assert "3. " not in out
     assert store.calls[-1]["filter"] is None
+
+
+def test_search_expands_to_the_whole_small_document_by_default(
+    session: Session, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    store = FakeChildStore.from_entries(indexed_book(session, tmp_path).rows.values())
+    capsys.readouterr()
+
+    assert run(session, "search", "zxqvortex", vectorstore=store) == 0
+
+    out = capsys.readouterr().out
+    assert out.startswith("1. carte — ")
+    assert "[document, " in out and "3/3 chunk-uri găsite]" in out
+    assert "2. " not in out  # cele 3 chunk-uri sunt același părinte
 
 
 def test_search_baseline_without_bm25(
@@ -344,6 +363,7 @@ def test_search_baseline_without_bm25(
         "zxqvortex",
         "--no-questions",
         "--no-hybrid",
+        "--no-expand",
         vectorstore=store,
     )
 
@@ -366,3 +386,96 @@ def test_search_rejects_blank_query(session: Session, caplog: pytest.LogCaptureF
     with caplog.at_level(logging.INFO):
         assert run(session, "search", "   ") == 1
     assert "întrebarea e goală" in caplog.text
+
+
+def write_tests(tmp_path: Path, *cases: tuple[str, list[str], str]) -> Path:
+    path = tmp_path / "tests.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"question": q, "keywords": kw, "category": cat}) + "\n"
+            for q, kw, cat in cases
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_evaluate_prints_metrics_per_mode_and_skips_unanswerable(
+    session: Session,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+):
+    store = FakeChildStore.from_entries(indexed_book(session, tmp_path).rows.values())
+    tests = write_tests(
+        tmp_path,
+        ("Ce e zxqvortex?", ["ZXQVORTEX"], "direct_fact"),
+        ("Și grâul?", ["grau"], "reasoning"),
+        ("Ce e secara?", ["secară"], "direct_fact"),  # nu e în carte
+    )
+    capsys.readouterr()
+
+    with caplog.at_level(logging.INFO):
+        code = run(
+            session, "evaluate", "--tests", str(tests), "--details", vectorstore=store
+        )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("2 întrebări evaluate, 1 sărite, k=10")
+    for mode in ("baseline ", "baseline+bm25", "multi-vector ", "multi-vector+bm25"):
+        assert mode in out
+    assert "\ndirect_fact:\n" in out and "\nreasoning:\n" in out
+    assert "MRR pe întrebare:" in out and "Ce e zxqvortex?" in out
+    assert "sărit (niciun cuvânt-cheie în chunk-uri): Ce e secara?" in caplog.text
+    # expand=False, k=10 → k * CHILDREN_PER_CHUNK copii; baseline filtrează pe content
+    filters = [c["filter"] for c in store.calls]
+    assert filters.count({"kind": "content"}) == 4 and filters.count(None) == 4
+
+
+def test_evaluate_single_mode_all_questions_and_save(
+    session: Session,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    store = FakeChildStore.from_entries(indexed_book(session, tmp_path).rows.values())
+    tests = write_tests(tmp_path, ("Ce e secara?", ["secară"], "direct_fact"))
+    monkeypatch.setattr(evaluation, "RESULTS_DIR", tmp_path / "results")
+    capsys.readouterr()
+
+    code = run(
+        session,
+        "evaluate",
+        "--tests",
+        str(tests),
+        "--mode",
+        "baseline",
+        "--all",
+        "--save",
+        "Primul test",
+        vectorstore=store,
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("1 întrebări evaluate, 0 sărite")
+    assert "multi-vector" not in out
+    [saved] = (tmp_path / "results").glob("*_primul-test.json")
+    data = json.loads(saved.read_text(encoding="utf-8"))
+    assert data["stage_metrics"]["baseline"]["mrr"] == 0.0
+    assert data["config"]["questions"] == 1
+
+
+def test_evaluate_fails_without_answerable_questions_or_on_bad_file(
+    session: Session, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    tests = write_tests(tmp_path, ("Ce e secara?", ["secară"], "direct_fact"))
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{nu e json\n", encoding="utf-8")
+
+    with caplog.at_level(logging.INFO):
+        assert run(session, "evaluate", "--tests", str(tests)) == 1
+        assert run(session, "evaluate", "--tests", str(bad)) == 1
+    assert "nicio întrebare de evaluat (1 sărite)" in caplog.text
+    assert "bad.jsonl:1: rând invalid" in caplog.text

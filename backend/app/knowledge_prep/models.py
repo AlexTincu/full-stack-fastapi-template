@@ -71,6 +71,13 @@ class Chunk(SQLModel, table=True):
     position: int
     heading_path: list[str] = Field(sa_type=sa.JSON)
     text: str = Field(sa_type=sa.Text)
+    # `chunking.chunk_hash`: `index` păstrează chunk-urile indexate cu același hash
+    content_hash: str | None = Field(default=None, max_length=64)
+    # pus după ce întrebările și vectorii chunk-ului sunt scriși; None = neterminat
+    indexed_at: datetime | None = Field(
+        default=None,
+        sa_type=sa.DateTime(timezone=True),  # type: ignore
+    )
 
 
 class Question(SQLModel, table=True):

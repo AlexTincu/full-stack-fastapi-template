@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.knowledge_prep import registry
 from app.knowledge_prep.converters import Converter
@@ -111,6 +111,56 @@ def test_register_same_file_twice_is_already_registered(
     reg(session, src)
     with pytest.raises(AlreadyRegistered):
         reg(session, src)
+
+
+def test_register_again_with_other_options_updates_the_same_row(
+    session: Session, tmp_path: Path
+):
+    src = make_file(tmp_path, "Regim DRI - Anemie.txt")
+    first = reg(session, src)
+    first_id = first.id
+
+    doc = reg(session, src, doc_type=DocumentType.regim, author="DRI")
+
+    assert (doc.id, doc.type, doc.split, doc.author, doc.stage) == (
+        first_id,
+        DocumentType.regim,
+        False,
+        "DRI",
+        Stage.uploaded,
+    )
+    assert len(session.exec(select(Document)).all()) == 1
+
+
+def test_register_structured_replaces_registration_as_original(
+    session: Session, tmp_path: Path
+):
+    md = make_file(tmp_path, "regimuri/Regim DRI - Aciditate.md", "# Aciditate\n")
+    first_id = registry.register(session, md, converters={".md": fake_converter}).id
+
+    doc = registry.register_structured(session, md, doc_type=DocumentType.regim)
+
+    assert (doc.id, doc.stage, doc.type, doc.split) == (
+        first_id,
+        Stage.structured,
+        DocumentType.regim,
+        False,
+    )
+    assert (doc.original_path, doc.markdown_path) == (None, str(md.resolve()))
+
+
+def test_register_again_after_index_goes_back_to_reviewed(
+    session: Session, tmp_path: Path
+):
+    doc, md = structured_doc(session, tmp_path)
+    registry.review(session, doc)
+    doc.stage, doc.indexed_hash = Stage.indexed, doc.reviewed_hash
+    session.commit()
+
+    doc = registry.register_structured(session, md, split=False)
+
+    assert (doc.stage, doc.split) == (Stage.reviewed, False)
+    assert doc.reviewed_hash == doc.indexed_hash is not None
 
 
 def test_register_rejects_slug_used_by_another_file(session: Session, tmp_path: Path):

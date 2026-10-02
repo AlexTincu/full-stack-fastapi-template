@@ -48,6 +48,8 @@ corect. Userul a acceptat rezultatul ca suficient de bun.
 7. **Chunk-urile și întrebările stau doar în DB** și se editează prin REST (faza 5).
    Reindexarea șterge chunk-urile, întrebările și vectorii vechi ai documentului și îi
    creează din nou; editările manuale ale întrebărilor se pierd (comanda avertizează).
+   *(Revizuit 2026-09-30: reindexarea e incrementală: se refac doar chunk-urile schimbate,
+   iar întrebările celor neschimbate rămân. Vezi „Indexarea”.)*
 8. **Întrebările se fac embedding imediat**, nu după review. Editarea unei întrebări
    reface doar vectorul ei.
 9. **Metadate minime.** Fără `recommended_for`, `tags` etc.: nu se potrivesc textelor
@@ -90,6 +92,8 @@ Hash-ul se calculează pe corpul markdown-ului, fără front-matter.
 | `position` | int | ordinea în document |
 | `heading_path` | JSON (listă de str) | ex. `["Grâul încolțit", "Contraindicații ale curei cu grâu încolțit"]` |
 | `text` | text | chunk-ul, cu headerele lui |
+| `content_hash` | varchar(64), null | sha256 pe `embedding_text`; identifică chunk-ul la reindexare (2026-09-30) |
+| `indexed_at` | timestamptz, null | pus după ce întrebările și vectorii chunk-ului sunt scriși; `null` = neterminat (2026-09-30) |
 
 ### `question`
 
@@ -229,6 +233,20 @@ Modul nou `app/knowledge_prep/index.py`, apelat de `index`.
 > relațională și ștergerea vectorilor după document_id; knowledge_vectors creat de PGEngine,
 > nu de Alembic. Detalii: backend/app/knowledge_prep/README.md.
 
+> **Revizuit (2026-09-30): indexare incrementală și reluabilă.** O rulare întreruptă (Ctrl+C în
+> notebook, după 74 de apeluri Gemini) pierdea tot, pentru că scrierea se făcea abia la final.
+> Acum:
+> - chunk-urile noi se compară cu cele din DB după `content_hash`. Un chunk identic, cu
+>   `indexed_at` pus și făcut în același mod (cu/fără întrebări), se păstrează, cu întrebările
+>   lui. Restul chunk-urilor vechi se șterg, cu vectorii lor (`delete_chunks`, după `doc_id`);
+> - chunk-urile de refăcut se procesează în loturi de `BATCH_SIZE` (10): întrebări, embeddings,
+>   `chunk` + `question`, vectori, apoi `indexed_at`, cu commit per lot;
+> - `stage=indexed` abia când toate chunk-urile au `indexed_at`. Un eșec sau o întrerupere
+>   păstrează loturile terminate, iar rularea următoare reia de acolo;
+> - `--force` reface toate chunk-urile. Regula pentru `validated` (cere `--force`) rămâne.
+>
+> Migrarea `3e8d5a1f4c27` completează coloanele pentru chunk-urile existente.
+
 ## Retrieval
 
 Modul nou (numele se stabilește în planul fazei 4), fără modificări în `rag_simple`.
@@ -256,6 +274,13 @@ Modul nou (numele se stabilește în planul fazei 4), fără modificări în `ra
 > fără diacritice (nu `hybrid_search_config`: acela lucrează pe copii, cu `ts_rank` și sumă
 > ponderată). Detalii: `backend/app/knowledge_prep/README.md`.
 
+> **Evaluarea, implementată (2026-09-30):** `evaluation.py` + comanda `evaluate`. Rulează cele
+> patru moduri (baseline / multi-vector, cu și fără BM25) pe chunk-uri (`expand=False`, k=10),
+> cu metricile din `retrieval_metrics.py` (copiate, pentru că importul lor încarcă modelele
+> `rag_simple`) și potrivire fără diacritice. Setul implicit e `rag_simple/evaluation/tests.jsonl`
+> până la setul dedicat (decizia 10), iar întrebările fără niciun cuvânt-cheie în chunk-uri se
+> sar. Prima rulare arată diferențe mici între moduri; rezultatele sunt în README.
+
 ## REST (faza 5)
 
 Rute în `app/api/routes/knowledge.py`, protejate ca rutele existente de superuser, care
@@ -280,7 +305,7 @@ Fiecare fază are propriul plan și e utilizabilă singură:
 2. **Restructurarea:** `restructure.py` și integrarea în `prepare`. ✅ 2026-09-28
 3. **Indexarea:** chunking, întrebări, `knowledge_vectors`, `index` (cu `--no-questions`). ✅ 2026-09-28 (verificare reală în așteptare)
 4. **Retrieval + evaluare:** `ChunkDocStore`, `MultiVectorRetriever`, BM25, comparația
-   baseline vs. multi-vector. ✅ retrieval 2026-09-29 (evaluarea în așteptare)
+   baseline vs. multi-vector. ✅ retrieval 2026-09-29, evaluare 2026-09-30
 5. **REST.**
 
 ## Testare

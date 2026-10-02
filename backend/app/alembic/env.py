@@ -25,8 +25,8 @@ from app.core.config import settings # noqa
 
 target_metadata = SQLModel.metadata
 
-# Tabele gestionate în afara Alembic (create de LangChain direct); nu le include în autogenerate
-_ALEMBIC_EXCLUDE_TABLES = {"rag_simple_chunks"}
+# Tabele gestionate în afara Alembic (create de LangChain sau de rag_simple direct); nu le include în autogenerate
+_ALEMBIC_EXCLUDE_TABLES = {"rag_simple_chunks", "rag_simple_documents"}
 _ALEMBIC_EXCLUDE_PREFIXES = ("knowledge_vectors",)  # knowledge_prep/vectors.py (+ tabelele de test)
 
 

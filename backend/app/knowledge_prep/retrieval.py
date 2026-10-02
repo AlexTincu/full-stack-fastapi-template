@@ -3,10 +3,12 @@
 - **multi-vector:** `MultiVectorRetriever` peste `knowledge_vectors` (copiii `content` + `question`),
   cu părinții din `ChunkDocStore`;
 - **baseline:** același retriever, doar cu copiii `content` (`filter={"kind": "content"}`);
-- **hibrid:** oricare dintre cele două + BM25 pe `chunk.text` (`lexical.py`), combinate prin
-  reciprocal rank fusion pe `chunk.id`.
+- **hibrid:** oricare dintre cele două + BM25 pe titluri + `chunk.text` (`lexical.py`), combinate
+  prin reciprocal rank fusion pe `chunk.id`;
+- **extindere (implicit):** chunk-urile ordonate devin părinți mai mari — document, secțiune sau
+  chunk cu vecini (`parents.py`); `expand=False` întoarce chunk-urile (evaluarea căutării).
 
-Evaluarea, rescrierea query-ului și reranking-ul nu sunt aici (vin după evaluare).
+Evaluarea e în `evaluation.py`. Rescrierea query-ului și reranking-ul nu sunt aici (se adaugă doar dacă evaluarea arată că ajută).
 """
 
 from collections.abc import Sequence
@@ -28,6 +30,7 @@ from tenacity import (
 from app.knowledge_prep.converters.gemini import log_retry
 from app.knowledge_prep.docstore import Bind, ChunkDocStore
 from app.knowledge_prep.lexical import ChunkBM25
+from app.knowledge_prep.parents import expand_to_parents
 from app.knowledge_prep.questions import MAX_QUESTIONS
 
 DEFAULT_K = 5
@@ -61,12 +64,13 @@ def _semantic_search(semantic: MultiVectorRetriever, query: str) -> list[Documen
 
 
 class KnowledgeRetriever(BaseRetriever):
-    """Top `k` chunk-uri pentru o întrebare, ca `Document`-uri cu metadatele din `ChunkDocStore`."""
+    """Top `k` părinți (sau chunk-uri, cu `expand=False`) pentru o întrebare, ca `Document`-uri."""
 
     semantic: MultiVectorRetriever
     docstore: ChunkDocStore
     lexical: ChunkBM25 | None = None
     k: int = DEFAULT_K
+    expand: bool = True
 
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
@@ -79,6 +83,8 @@ class KnowledgeRetriever(BaseRetriever):
         else:
             lexical_ids = self.lexical.search(query, self.k * CHILDREN_PER_CHUNK)
             ranked = reciprocal_rank_fusion([semantic_ids, lexical_ids])
+        if self.expand:
+            return expand_to_parents(self.docstore.bind, ranked, self.k)
         # BM25 poate avea id-uri de chunk-uri șterse după construirea lui: mget le dă None
         docs = [d for d in self.docstore.mget(ranked) if d is not None]
         return docs[: self.k]
@@ -91,8 +97,10 @@ def build_retriever(
     k: int = DEFAULT_K,
     questions: bool = True,
     hybrid: bool = True,
+    expand: bool = True,
 ) -> KnowledgeRetriever:
-    """`questions=False` = baseline (doar vectorii `content`); `hybrid=True` adaugă BM25.
+    """`questions=False` = baseline (doar vectorii `content`); `hybrid=True` adaugă BM25;
+    `expand=False` întoarce chunk-urile găsite în loc de părinții lor.
 
     `vectorstore` e în producție `PgVectorIndex.from_settings().store`; `bind` e engine-ul
     (sau conexiunea) Postgres. Indexul BM25 se construiește acum, din toate chunk-urile.
@@ -114,4 +122,5 @@ def build_retriever(
         docstore=docstore,
         lexical=ChunkBM25.from_db(bind) if hybrid else None,
         k=k,
+        expand=expand,
     )

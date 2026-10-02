@@ -1,4 +1,4 @@
-"""CLI-ul pipeline-ului de cunoștințe: register → prepare → review → index → validate, plus status și search.
+"""CLI-ul pipeline-ului de cunoștințe: register → prepare → review → index → validate, plus status, search și evaluate.
 
 Rulare din backend/:
     uv run python -m app.knowledge_prep <comandă> <țintă> [opțiuni]
@@ -12,12 +12,14 @@ import logging
 import os
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from langchain_core.vectorstores import VectorStore
 from sqlmodel import Session, col, select
 
-from app.knowledge_prep import registry
+from app.knowledge_prep import evaluation, registry
+from app.knowledge_prep.chunking import count_tokens
 from app.knowledge_prep.convert import CONVERTED_DIR
 from app.knowledge_prep.converters import CONVERTERS, Converter
 from app.knowledge_prep.index import check_indexable, index_document
@@ -27,6 +29,7 @@ from app.knowledge_prep.registry import AlreadyRegistered, RegistryError
 from app.knowledge_prep.restructure import Restructurer, restructure
 from app.knowledge_prep.retrieval import DEFAULT_K, build_retriever
 from app.knowledge_prep.vectors import PgVectorIndex, VectorIndex
+from app.rag_simple.evaluation.results import EvalSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     idx.add_argument(
         "--force",
         action="store_true",
-        help="reindexează un document 'validated' (întrebările editate manual se pierd)",
+        help="reface toate chunk-urile, fără reutilizare; necesar pe 'validated' (întrebările editate manual se pierd)",
     )
 
     sub.add_parser("validate", help="→ 'validated'").add_argument("target")
@@ -115,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     srch.add_argument("query", help="întrebarea, între ghilimele")
     srch.add_argument(
-        "-k", type=_positive_int, default=DEFAULT_K, help="câte chunk-uri (implicit 5)"
+        "-k", type=_positive_int, default=DEFAULT_K, help="câte rezultate (implicit 5)"
     )
     srch.add_argument(
         "--questions",
@@ -128,6 +131,43 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="--no-hybrid: fără BM25",
+    )
+    srch.add_argument(
+        "--expand",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="--no-expand: chunk-urile găsite, nu părinții lor (document/secțiune)",
+    )
+
+    ev = sub.add_parser(
+        "evaluate",
+        help="metricile retrieval-ului pe întrebările de test, pe fiecare mod (baseline, multi-vector, ± BM25)",
+    )
+    ev.add_argument(
+        "--tests",
+        type=Path,
+        default=evaluation.DEFAULT_TESTS,
+        help="fișier JSONL (implicit: rag_simple/evaluation/tests.jsonl)",
+    )
+    ev.add_argument(
+        "--mode",
+        dest="modes",
+        action="append",
+        choices=list(evaluation.MODES),
+        help="se poate repeta; implicit toate",
+    )
+    ev.add_argument(
+        "--all",
+        action="store_true",
+        help="include și întrebările fără niciun cuvânt-cheie în chunk-urile indexate",
+    )
+    ev.add_argument(
+        "--details", action="store_true", help="și MRR-ul fiecărei întrebări, pe moduri"
+    )
+    ev.add_argument(
+        "--save",
+        metavar="ETICHETĂ",
+        help=f"salvează mediile ca JSON în {evaluation.RESULTS_DIR.name}/",
     )
     return p
 
@@ -278,10 +318,11 @@ def _index(
         logger.exception("EROARE %s: %s", args.target, e)
         return 1
     logger.info(
-        "%s: %s (%d chunk-uri, %d întrebări, %d avertismente)",
+        "%s: %s (%d chunk-uri, %d păstrate, %d întrebări, %d avertismente)",
         doc.slug,
         doc.stage,
         report.chunks,
+        report.reused,
         report.questions,
         len(report.warnings),
     )
@@ -304,6 +345,7 @@ def _search(
             k=args.k,
             questions=args.questions,
             hybrid=args.hybrid,
+            expand=args.expand,
         )
         docs = retriever.invoke(query)
     except Exception as e:
@@ -315,9 +357,110 @@ def _search(
     for i, d in enumerate(docs, 1):
         m = d.metadata
         snippet = " ".join(d.page_content.split())[:SNIPPET_CHARS]
-        sys.stdout.write(
-            f"{i}. {m['slug']} — {' > '.join(m['heading_path'])}\n   {snippet}\n"
+        scope = (
+            f" [{m['scope']}, {count_tokens(d.page_content)} tokeni, "
+            f"{len(m['matched_chunk_ids'])}/{len(m['chunk_ids'])} chunk-uri găsite]"
+            if "scope" in m
+            else ""
         )
+        sys.stdout.write(
+            f"{i}. {m['slug']} — {' > '.join(m['heading_path'])}{scope}\n   {snippet}\n"
+        )
+    return 0
+
+
+def _table(rows: Sequence[Sequence[str]]) -> None:
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        line = "  ".join(cell.ljust(w) for cell, w in zip(r, widths, strict=True))
+        sys.stdout.write(line.rstrip() + "\n")
+
+
+def _metrics_table(averages: Mapping[str, Mapping[str, float]]) -> None:
+    _table(
+        [("mod", *evaluation.METRICS)]
+        + [
+            (mode, *(f"{values[m]:.3f}" for m in evaluation.METRICS))
+            for mode, values in averages.items()
+        ]
+    )
+
+
+def _evaluate(
+    args: argparse.Namespace, session: Session, vectorstore: VectorStore | None
+) -> int:
+    try:
+        tests = evaluation.load_tests(args.tests)
+    except (OSError, ValueError) as e:
+        logger.error("EROARE: %s", e)
+        return 1
+    bind = session.get_bind()
+    if args.all:
+        answerable, skipped = tests, []
+    else:
+        answerable, skipped = evaluation.split_answerable(
+            tests, evaluation.chunk_texts(bind)
+        )
+        for t in skipped:
+            logger.info("sărit (niciun cuvânt-cheie în chunk-uri): %s", t.question)
+    if not answerable:
+        logger.error("EROARE: nicio întrebare de evaluat (%d sărite)", len(skipped))
+        return 1
+    modes = args.modes or list(evaluation.MODES)
+    try:
+        store = (
+            vectorstore
+            if vectorstore is not None
+            else PgVectorIndex.from_settings().store
+        )
+        retrievers = {
+            mode: build_retriever(
+                store,
+                bind,
+                k=evaluation.EVAL_K,
+                questions=evaluation.MODES[mode][0],
+                hybrid=evaluation.MODES[mode][1],
+                expand=False,
+            )
+            for mode in modes
+        }
+        report = evaluation.evaluate(retrievers, answerable, skipped)
+    except Exception as e:
+        logger.exception("EROARE: %s", e)
+        return 1
+
+    sys.stdout.write(
+        f"{len(report.results)} întrebări evaluate, {len(report.skipped)} sărite, "
+        f"k={evaluation.EVAL_K}, chunk-uri (fără extindere)\n\n"
+    )
+    _metrics_table(report.averages())
+    for category in report.categories():
+        sys.stdout.write(f"\n{category or '(fără categorie)'}:\n")
+        _metrics_table(report.averages(category))
+    if args.details:
+        sys.stdout.write("\nMRR pe întrebare:\n")
+        _table(
+            [(*modes, "întrebare")]
+            + [
+                (*(f"{r.metrics[m]['mrr']:.2f}" for m in modes), r.test.question)
+                for r in report.results
+            ]
+        )
+    if args.save:
+        snapshot = EvalSnapshot(
+            label=args.save,
+            timestamp=datetime.now().strftime("%Y-%m-%dT%H-%M-%S"),
+            config={
+                "tests": str(args.tests),
+                "k": evaluation.EVAL_K,
+                "questions": len(report.results),
+                "skipped": len(report.skipped),
+                "expand": False,
+            },
+            stage_metrics=report.averages(),
+        )
+        path = snapshot.save(evaluation.RESULTS_DIR)
+        sys.stdout.write(f"\nsalvat: {path}\n")
     return 0
 
 
@@ -340,10 +483,7 @@ def _status(args: argparse.Namespace, session: Session) -> int:
         )
         for d in docs
     ]
-    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
-    for r in rows:
-        line = "  ".join(cell.ljust(w) for cell, w in zip(r, widths, strict=True))
-        sys.stdout.write(line.rstrip() + "\n")
+    _table(rows)
     return 0
 
 
@@ -370,6 +510,8 @@ def _dispatch(
             return _single(registry.validate, args, session)
         case "search":
             return _search(args, session, vectorstore)
+        case "evaluate":
+            return _evaluate(args, session, vectorstore)
         case _:
             return _status(args, session)
 

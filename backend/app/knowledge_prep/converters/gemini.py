@@ -2,6 +2,7 @@
 
 import logging
 
+import httpx
 from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel
@@ -34,6 +35,11 @@ def thinking_config(model: str) -> types.ThinkingConfig:
     return types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW)
 
 
+# Clientul genai nu face retry implicit și nu împachetează erorile de rețea (DNS, conexiune, timeout)
+# în `errors.APIError`: fără `httpx.TransportError` aici, o cădere scurtă de rețea oprește tot indexul.
+RETRYABLE = (errors.APIError, httpx.TransportError)
+
+
 def log_retry(retry_state):
     logger.warning(
         "[retry] %s attempt %d failed: %r — retrying...",
@@ -44,7 +50,7 @@ def log_retry(retry_state):
 
 
 @retry(
-    retry=retry_if_exception_type(errors.APIError),
+    retry=retry_if_exception_type(RETRYABLE),
     wait=wait_exponential(multiplier=2, min=4, max=60),
     stop=stop_after_attempt(5),
     before_sleep=log_retry,
@@ -60,7 +66,7 @@ def generate(client: genai.Client, model: str, contents: list) -> str | None:
 
 
 @retry(
-    retry=retry_if_exception_type(errors.APIError),
+    retry=retry_if_exception_type(RETRYABLE),
     wait=wait_exponential(multiplier=2, min=4, max=60),
     stop=stop_after_attempt(5),
     before_sleep=log_retry,

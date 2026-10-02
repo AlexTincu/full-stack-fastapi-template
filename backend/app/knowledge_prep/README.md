@@ -22,7 +22,7 @@ RAG.
 | 1 | Registrul: `register`, `prepare` (doar conversie), `review`, `validate`, `status` | ✅ |
 | 2 | Restructurarea cu Gemini, în `prepare` | ✅ (2026-09-28) |
 | 3 | Indexarea: chunking, întrebări, `knowledge_vectors`, `index` | ✅ (2026-09-28, verificare reală în așteptare) |
-| 4 | Retrieval + evaluare | retrieval ✅ (2026-09-29), evaluarea în așteptare |
+| 4 | Retrieval + evaluare | ✅ retrieval (2026-09-29), evaluare (2026-09-30) |
 | 5 | REST | — |
 
 ## Fluxul
@@ -44,6 +44,13 @@ apoi rulează `review`.
 front-matter. `review` salvează hash-ul corpului (fără front-matter). Dacă fișierul se modifică
 după aceea, `status` afișează „modificat după review”.
 
+**Reînregistrarea** aceluiași fișier (ca original sau ca markdown structurat, oricum ar fi fost
+înregistrat prima dată) **actualizează rândul existent** (același id), ca să arate exact ca o
+înregistrare nouă cu opțiunile date: tip, `split`, titlu/slug, autor, căi. Cu aceleași opțiuni se
+sare (`AlreadyRegistered`). Dacă se schimbă markdown-ul (ex. original → `--structured`), stadiul și
+hash-urile o iau de la capăt; altfel un document `indexed`/`validated` coboară la `reviewed`, ca să
+fie reindexat cu noile setări (chunk-urile vechi rămân în DB până la `index`).
+
 ## Comenzi
 
 Din `full-stack-fastapi-template/backend/`:
@@ -54,7 +61,9 @@ uv run python -m app.knowledge_prep prepare <id|slug|cale|folder> [--force] [--r
 uv run python -m app.knowledge_prep review|validate <id|slug|cale>
 uv run python -m app.knowledge_prep index <id|slug|cale> [--no-questions] [--force]
 uv run python -m app.knowledge_prep status [<țintă>]
-uv run python -m app.knowledge_prep search "<întrebare>" [-k N] [--no-questions] [--no-hybrid]
+uv run python -m app.knowledge_prep search "<întrebare>" [-k N] [--no-questions] [--no-hybrid] [--no-expand]
+uv run python -m app.knowledge_prep evaluate [--tests <fișier.jsonl>] [--mode baseline ...] [--all] [--details] [--save "<etichetă>"]
+uv run python -m app.knowledge_prep.explorer                # Gradio: comparația a două metode de retrieval
 
 uv run pytest app/knowledge_prep                            # fără Postgres și fără Gemini
 uv run ruff check app/knowledge_prep && uv run ty check app/knowledge_prep
@@ -63,7 +72,7 @@ uv run ruff check app/knowledge_prep && uv run ty check app/knowledge_prep
 Ai nevoie de `GEMINI_API_KEY` și `GEMINI_MODEL` în `full-stack-fastapi-template/.env`. `index`
 are nevoie și de `OPENAI_API_KEY` (embeddings, `text-embedding-3-large`), pe lângă cheile Gemini
 (întrebările, dacă nu rulezi cu `--no-questions`). `search` are nevoie doar de `OPENAI_API_KEY`
-(embedding-ul întrebării).
+(embedding-ul întrebării), la fel și `evaluate`.
 
 ## Harta modulului
 
@@ -79,11 +88,16 @@ are nevoie și de `OPENAI_API_KEY` (embeddings, `text-embedding-3-large`), pe l�
 | `chunking.py` | `chunk_markdown`: markdown revizuit → `ChunkDraft`-uri (faza 3, detalii mai jos) |
 | `questions.py` | `generate_questions`: 1-5 întrebări Gemini per chunk, output structurat (faza 3) |
 | `vectors.py` | `PgVectorIndex` / `VectorEntry`: tabelul `knowledge_vectors`, embeddings OpenAI (faza 3) |
-| `index.py` | `index_document`: orchestrează chunking + întrebări + vectori într-un pas (faza 3) |
-| `tests/index_fakes.py` | `FakeVectors`, `FakeQuestions` — fake-urile injectate în testele fazei 3 |
+| `index.py` | `index_document`: chunking + întrebări + vectori, incremental și pe loturi (faza 3; reluabil din 2026-09-30) |
+| `tests/index_fakes.py` | `FakeVectors` (cu `fail`/`writes_ok` pentru căderi la un anumit lot), `FakeQuestions` — fake-urile injectate în testele fazei 3 |
 | `docstore.py` | `ChunkDocStore`: părintele `MultiVectorRetriever` peste tabelul `chunk`, doar-citire (faza 4) |
-| `lexical.py` | `tokenize`, `ChunkBM25`: index BM25 în memorie peste `chunk.text` (faza 4) |
+| `lexical.py` | `tokenize`, `ChunkBM25`: index BM25 în memorie peste titluri + `chunk.text`, cu stopwords și stemming (faza 4) |
+| `parents.py` | `expand_to_parents`, `parent_of`: chunk-urile găsite → părinți mai mari (document / secțiune / chunk cu vecini) pentru LLM (faza 4) |
 | `retrieval.py` | `build_retriever`, `KnowledgeRetriever`, `reciprocal_rank_fusion`: multi-vector, baseline, hibrid (faza 4) |
+| `evaluation.py` | `evaluate`, `question_metrics`, `load_tests`, `split_answerable`: metricile retrieval-ului pe întrebările de test, pe fiecare mod (faza 4) |
+| `explorer.py` | Gradio pentru comparația vizuală a retrieval-ului: două panouri, `rag_simple` sau oricare mod (faza 4, detalii mai jos) |
+| `eval_results/` | instantanee JSON ale evaluărilor salvate cu `evaluate --save` (formatul `EvalSnapshot` din `rag_simple`) |
+| `notebooks/` | câte un Jupyter notebook pe fază (`01_register.ipynb`, ...): aceleași funcții ca CLI-ul, cu explicații și opțiuni în variabile, pentru test și debug pe DB-ul real |
 | `tests/retrieval_fakes.py` | `add_document`, `child`, `FakeChildStore` — fake-urile injectate în testele de retrieval |
 | `tests/pg.py` | `PG_URL`, `requires_pg`, `has_table`, `drop_table` — conexiunea Postgres pentru testele de integrare (`test_vectors_pg.py`, `test_retrieval_pg.py`) |
 
@@ -205,38 +219,39 @@ altfel) și vectorii lor în `knowledge_vectors`. `index <țintă>` face toți c
 dintr-o comandă; `--no-questions` sare peste întrebări (indexează doar vectorii `content`,
 baseline-ul din spec).
 
-### Ordinea pașilor, și de ce
+### Ordinea pașilor, și de ce (indexare incrementală, 2026-09-30)
 
 `index_document` (`index.py`) face, în ordine:
 
-1. **Tot ce cere un API extern, în memorie, înainte de orice scriere:** generarea
-   întrebărilor (Gemini, dacă nu e `--no-questions`) și embeddings (OpenAI, pentru toate
-   textele `content` + `question` deodată).
-2. **`chunk` și `question` se înlocuiesc într-o singură tranzacție relațională:** se șterg
-   `Question` (după `chunk_id`) și `Chunk` (după `document_id`) ale documentului, apoi se
-   inserează cele noi. Commit.
-3. **Vectorii se șterg după `document_id`**, apoi se adaugă cei noi (`vectors.replace_document`).
-   Ștergerea după `document_id`, nu după id-urile chunk-urilor vechi, curăță și resturile
-   unei rulări anterioare întrerupte la pasul 3.
-4. Abia acum `doc.stage = indexed`, `doc.indexed_hash = doc.reviewed_hash`.
+1. **Chunking** și comparația cu chunk-urile din DB după `content_hash` (`chunking.chunk_hash`,
+   sha256 pe `embedding_text`). Un chunk vechi se **păstrează** dacă are același hash, are
+   `indexed_at` pus și a fost făcut în același mod: are întrebări exact când rularea curentă
+   le cere. Un chunk păstrat primește doar `position` nouă; întrebările lui, inclusiv cele
+   editate manual, rămân. `--force` nu păstrează nimic.
+2. **Chunk-urile vechi nepăstrate** (dispărute, schimbate, neterminate sau făcute în alt mod)
+   se șterg: întâi vectorii lor (`vectors.delete_chunks`, după `doc_id`, deci și resturile unei
+   rulări întrerupte), apoi `question` și `chunk`. Commit.
+3. **Chunk-urile de refăcut, în loturi de `BATCH_SIZE` (10)**: întrebări Gemini, embeddings
+   OpenAI, apoi `chunk` + `question` (commit, încă fără `indexed_at`), vectorii
+   (`vectors.add`) și `indexed_at` (commit).
+4. Abia după ultimul lot: `doc.stage = indexed`, `doc.indexed_hash = doc.reviewed_hash`.
 
-Motivul ordinii: API-urile (pașii 1 și, pentru vectori, embeddings din pasul 3) sunt partea
-care poate eșua din motive externe (cotă, rețea), și un eșec acolo nu trebuie să lase nimic
-pe jumătate scris. Ce rămâne în urmă, pe tip de eșec (toate scriu `last_error` prin
-`record_step`, stadiul rămânând cel dinainte de `index`):
+Ce rămâne după un eșec sau o întrerupere (`record_step` scrie `last_error` și pentru
+`KeyboardInterrupt`, ca „întrerupt”; stadiul rămâne cel dinainte):
 
-- **Eșec la întrebări sau la embeddings** (pasul 1): nimic nu s-a scris încă — `chunk` și
-  `question` vechi rămân neatinse, vectorii vechi la fel.
-- **Eșec la scrierea vectorilor** (pasul 3, după commit-ul relațional de la pasul 2): `chunk`
-  și `question` sunt **deja** cele noi (commit-ul s-a făcut), dar `knowledge_vectors` a fost
-  golit de `delete(filter={"document_id": ...})` înainte de eșecul la inserare — documentul
-  are chunk-uri fără vectori. Dacă documentul pornea de la `reviewed` (primul `index`),
-  `doc.stage` rămâne `reviewed`, deci pare „neindexat” deși are chunk-uri noi în DB. **Dacă
-  documentul era deja `indexed` sau `validated` (reindexare)**, `doc.stage` nu se schimbă în
-  acest pas eșuat — deci rămâne `indexed`/`validated` cu vectori inexistenți; singurul semnal
-  e `last_error`, nu stadiul. În ambele cazuri, o nouă rulare `index` (fără `--force` dacă
-  stadiul era `reviewed`, cu `--force` dacă era `validated`) reface totul corect: chunk-urile
-  se recreează identic, iar vectorii se scriu din nou.
+- loturile terminate rămân în DB, cu `indexed_at`;
+- lotul în curs lasă cel mult chunk-uri fără `indexed_at`. Rularea următoare le șterge (cu
+  vectorii scriși parțial) și le reface;
+- o nouă rulare `index` cere întrebări doar pentru chunk-urile rămase. Dacă totul fusese scris
+  (întrerupere după ultimul lot), doar marchează documentul `indexed`, fără apeluri API.
+
+**Atenție la întreruperea din notebook:** `langchain_postgres` scrie vectorii pe un thread
+propriu, pe care Ctrl+C nu îl oprește, așa că un lot întrerupt la scriere se poate termina
+totuși în fundal. Nu e o problemă de corectitudine: chunk-urile lui n-au `indexed_at`, deci
+rularea următoare le reface.
+
+Log-ul arată câte chunk-uri se păstrează și progresul pe loturi („lot 3/8: embeddings și
+scriere ...”), ca o scriere lungă să nu pară blocată.
 
 `__main__.py::_index` cheamă `check_indexable(doc, force=...)` **înainte** de a construi
 `PgVectorIndex.from_settings()` (fix din 48ed5f3): o regulă încălcată (stadiu, hash modificat,
@@ -290,17 +305,17 @@ e suficient de rapidă.
 ### `validated` → `--force`
 
 Reindexarea unui document `validated` cere `--force`: altfel, `check_indexable` refuză cu un
-mesaj explicit că întrebările existente (eventual editate manual în faza 5 REST) s-ar pierde.
-Independent de `--force`, dacă documentul are deja întrebări (orice reindexare, nu doar peste
-`validated`), `index_document` avertizează `se înlocuiesc N întrebări existente (editările
-manuale se pierd)` — e un avertisment, comanda continuă.
+mesaj explicit. Cu `--force` se refac **toate** chunk-urile, deci se pierd și întrebările
+editate manual. Fără `--force`, pe un document `reviewed`/`indexed` se pierd doar întrebările
+chunk-urilor schimbate, iar `index_document` avertizează `se înlocuiesc N întrebări
+existente (editările manuale se pierd)`. E doar un avertisment; comanda continuă.
 
 ### Limitări cunoscute
 
-- **Fără cache pe întrebări** (la fel ca `restructure.py`, care nu are nici el cache pe ferestre,
-  dar e mai puțin costisitor). O carte cu multe secțiuni întreruptă la mijloc (eroare
-  de rețea, cotă Gemini) se reindexează de la zero la următoarea rulare — niciun chunk nu-și
-  ține întrebările generate deja.
+- **Un chunk cu 0 întrebări generate** (avertisment `nicio întrebare generată`) arată ca unul
+  făcut cu `--no-questions`, deci se reface la următorul `index` cu întrebări.
+- **Schimbarea parametrilor de chunking** schimbă textul chunk-urilor, deci hash-urile: se
+  refac automat doar chunk-urile afectate.
 - **Un apel Gemini per chunk, secvențial.** Nicio paralelizare: o carte cu 30 de secțiuni face
   30 de apeluri unul după altul. Acceptabil la dimensiunile actuale ale corpusului.
 - **`tiktoken` descarcă encoderul `cl100k_base` la prima rulare** (cache local după aceea,
@@ -322,14 +337,16 @@ README._
 | instrucțiunile date modelului pentru întrebări | `PROMPT` (`questions.py`) |
 | câte întrebări maxim per chunk | `MAX_QUESTIONS` (`questions.py`) |
 
-## Retrieval (`docstore.py`, `lexical.py`, `retrieval.py`)
+## Retrieval (`docstore.py`, `lexical.py`, `parents.py`, `retrieval.py`)
 
 ### Ce rezolvă
 
 Transformă indexul fazei 3 (`chunk`, `knowledge_vectors`) într-un retriever gata de folosit:
-top `k` chunk-uri pentru o întrebare, ca `Document`-uri cu metadatele din `ChunkDocStore`.
-Patru combinații, prin cele două opțiuni ortogonale ale lui
-`build_retriever(vectorstore, bind, *, k=DEFAULT_K, questions=True, hybrid=True)`:
+top `k` **părinți** pentru o întrebare (documentul întreg, o secțiune sau chunk-ul cu vecinii
+lui — vezi „Extinderea la părinți”), ca `Document`-uri LangChain. Cu `expand=False` întoarce
+chunk-urile găsite, cu metadatele din `ChunkDocStore` (pentru evaluarea căutării).
+Patru combinații de căutare, prin cele două opțiuni ortogonale ale lui
+`build_retriever(vectorstore, bind, *, k=DEFAULT_K, questions=True, hybrid=True, expand=True)`:
 
 | `questions` | `hybrid` | Ce caută |
 |---|---|---|
@@ -356,12 +373,38 @@ faza 5, un viitor agent) — nu construi `KnowledgeRetriever` direct.
    `PGVectorStore` pune `doc_id` în metadatele copiilor ca `uuid.UUID` (coloana e `UUID`), iar
    `MultiVectorRetriever` i-l dă neschimbat lui `mget`; testele și CLI-ul folosesc `str`.
 3. **Lexical (`ChunkBM25.from_db`):** un index `rank_bm25.BM25Okapi` construit o dată, în
-   memorie, din `chunk.text` al **tuturor** chunk-urilor din DB (nu din copiii `content`, ca
-   textul embedded, ci din textul brut al chunk-ului).
+   memorie, din **toate** chunk-urile din DB, pe același text ca vectorul `content`
+   (`embedding_text`: calea de titluri + `chunk.text`). Titlurile contează: „Germenii de grâu
+   combat constipația” e doar în `heading_path`, nu și în textul chunk-ului.
 4. **Hibrid:** listele semantică și lexicală (id-uri de `chunk`) se combină prin
    `reciprocal_rank_fusion` pe `chunk.id`, cu `RRF_K = 60` (constanta din articolul RRF, ca în
-   `rag_simple`); la egalitate câștigă ordinea din lista semantică. Rezultatul final se citește
-   prin `ChunkDocStore.mget` și se trunchiază la `k`.
+   `rag_simple`); la egalitate câștigă ordinea din lista semantică.
+5. **Extinderea la părinți** (implicit, `parents.py`): lista ordonată de chunk-uri devine o
+   listă de părinți distincți, trunchiată la `k`. Cu `expand=False`, rezultatul se citește prin
+   `ChunkDocStore.mget` și se trunchiază la `k` chunk-uri.
+
+### Extinderea la părinți (decizia 2026-09-29)
+
+Chunk-urile mici sunt bune pentru **găsire** (un vector pe o temă îngustă se potrivește precis),
+dar prea mici pentru **răspuns**: la „am colesterolul mare”, LLM-ul trebuie să vadă și dozele, și
+contraindicațiile curei, nu doar secțiunea „scade colesterolul”. De aceea căutarea rămâne pe
+chunk-uri, iar fiecare chunk găsit se extinde, în ordinea rangului, la cea mai largă unitate care
+încape în `PARENT_MAX_TOKENS = 4000`:
+
+1. **documentul întreg** (`scope="document"`, `heading_path = [titlu]`);
+2. altfel, **secțiunea strămoșă cea mai largă**: prefixele lui `heading_path`, de la rădăcină în
+   jos; primul care încape (`scope="section"`). Un document cu un singur `#` (titlul) trece
+   astfel la capitolele `##`;
+3. altfel, **chunk-ul cu vecinii lui** (± `NEIGHBORS = 1`), doar cei cu același `heading_path`
+   (`scope="chunk"`) — bucățile unei secțiuni mari tăiate de `_split_large`.
+
+Părinții se deduplică după conținut: al doilea chunk găsit în același părinte nu ocupă un loc din
+`k`, doar se adaugă la `metadata["matched_chunk_ids"]`. Metadatele unui părinte: `chunk_id` (cel
+mai bun chunk găsit în el, ca la `expand=False`), `matched_chunk_ids`, `chunk_ids` (toți membrii,
+în ordine), `document_id`, `slug`, `title`, `heading_path`, `scope`. Textul e `chunk.text`-urile
+membrilor lipite cu un rând gol (headerele sunt deja în text). Cu `k=5`, contextul e de cel mult
+~20k tokeni. Documentele se încarcă leneș, câte unul, și nu se mai încarcă altele după `k`
+părinți.
 
 ### De ce BM25 cu `rank_bm25`, nu `hybrid_search_config`
 
@@ -375,29 +418,37 @@ corpus care azi are câteva zeci de chunk-uri. `rank_bm25` în memorie e suficie
 această dimensiune și e deja dependență directă (folosit și de `rag_simple`).
 
 **Tokenizarea** (`tokenize`, `lexical.py`): literele mici, NFKD, fără semnele combinante
-(`ă→a`, `â`/`î→a`/`i`, `ș`/`ş→s`, `ț`/`ţ→t`), apoi `\w+`. Aceeași funcție pe corpus și pe query.
-Motiv: utilizatorii scriu des fără diacritice, iar unele texte vechi din corpus au sedilă
-(`ş`/`ţ`) în loc de virgulă.
+(`ă→a`, `â`/`î→a`/`i`, `ș`/`ş→s`, `ț`/`ţ→t`), apoi `\w+`, fără `STOPWORDS` (cuvinte de legătură,
+scrise fără diacritice), apoi stemmer-ul Snowball pentru română (`snowballstemmer`). Aceeași
+funcție pe corpus și pe query. Diacriticele se scot **înainte** de stemming: utilizatorii scriu
+des fără ele, unele texte vechi au sedilă (`ş`/`ţ`), iar așa „constipație”, „constipația”,
+„constipatie” și „constipatia” dau toate `constipat` (cu diacritice, stemmer-ul dă `constip`
+pentru unele și `constipat` pentru altele).
+
+**De ce stopwords + stemming (2026-09-29):** fără ele, hibridul strica sistematic rezultatele
+multi-vector. „ce”, „cine”, „pentru” primeau IDF mare pe corpusul mic (ex. `cine` = 2.44) și
+aduceau chunk-uri care doar le conțineau, iar „constipație” din întrebare nu se potrivea cu
+„constipația” din text. Măsurat pe 7 întrebări (vezi „Rezultate reale”): chunk-ul corect a
+revenit pe #1 în hibrid la „constipație”, „contraindicații”, „obosit”, „părul”.
 
 ### Limitări cunoscute
 
-- **Fără stemming:** `grâu` ≠ `grâul` la BM25 (partea semantică acoperă formele flexionate; se
-  reevaluează după evaluare — vezi întrebarea deschisă 1 din plan).
+- **Stemming parțial:** articolul hotărât după vocală rămâne (`grâul` → `graul`, `grâu` → `grau`);
+  la fel, stemmer-ul nu unifică forme cu alternanțe (`nervos`/`nervoasă`). Partea semantică
+  acoperă aceste cazuri.
+- **Pe un corpus foarte mic, BM25Okapi dă IDF 0** unui cuvânt prezent în exact jumătate din
+  chunk-uri (ex. 1 din 2), deci și scor 0 — ține cont de asta în teste.
 - **Indexul BM25 nu vede chunk-uri noi până la un nou `build_retriever`:** se construiește o
   singură dată, din tot ce era în DB la acel moment. CLI-ul `search` îl reface la fiecare
   rulare, deci pentru el nu e o problemă; un proces de durată (server, agent) ar avea nevoie
   să-l reconstruiască periodic — decizie lăsată pentru faza 5 (întrebarea deschisă 2 din plan).
-- **Fără stopwords, cuvintele comune primesc scor BM25 mic dar pozitiv pe corpusul real, nu ≤ 0.**
-  `BM25Okapi` limitează IDF-ul negativ la `epsilon * average_idf` (epsilon implicit 0.25 în
-  `rank_bm25`), iar media IDF e pozitivă pe un corpus real (mii de chunk-uri diverse) — un cuvânt
-  ca „la”/„ce”/„de”, prezent în peste jumătate din chunk-uri, ia acest prag pozitiv în loc de un
-  IDF negativ. Cum `tokenize` (mai sus) nu elimină stopwords, aproape orice întrebare în română
-  umple lista de candidați BM25 (`k * CHILDREN_PER_CHUNK`) cu potriviri slabe, care intră în RRF
-  cu aceeași pondere de rang ca potrivirile puternice — explicația probabilă pentru chunk-urile
-  mari și generice (`heading_path` = titlul documentului) din „Rezultate reale” mai jos. Scorul
-  ≤ 0 apare doar pe corpusuri mici/sintetice (ex. teste), unde media IDF poate fi negativă.
-  Eliminarea stopwords rămâne amânată pentru faza de evaluare (întrebarea deschisă 1 din plan) —
-  nu e o schimbare de comportament aici, doar o corectare a explicației.
+- **Cuvintele comune care nu sunt în `STOPWORDS` primesc scor BM25 mic, dar pozitiv.**
+  `BM25Okapi` limitează IDF-ul negativ la `epsilon * average_idf` (epsilon implicit 0.25), iar
+  media IDF e pozitivă pe un corpus real; un cuvânt prezent în peste jumătate din chunk-uri ia
+  acest prag în loc de un IDF negativ. Lista de stopwords reduce efectul, nu-l elimină.
+- **Părinții se repetă parțial la secțiunile foarte mari:** bucățile tăiate cu
+  `CHUNK_OVERLAP_TOKENS` au text comun, iar textul lipit al părintelui îl repetă. Ferestrele
+  `scope="chunk"` a două chunk-uri găsite apropiate se pot suprapune (sunt părinți diferiți).
 - **Documentele readuse în `structured`** (`prepare --force`) rămân căutabile până la
   următorul `index`: retrieval-ul nu filtrează după stadiu, doar citește `chunk` și
   `knowledge_vectors` cum sunt (spec, „Stadii” — chunk-urile și vectorii unui document rămân
@@ -429,14 +480,139 @@ diacritice merge.
   test și un corpus mai mare (inclusiv cărți indexate). Zgomot: fiecare rulare CLI afișează pe
   stderr avertismentul `from pydantic.v1 import BaseModel` (dintr-o bibliotecă, preexistent).
 
+### Rezultate reale, după schimbarea întrebărilor, BM25 și extindere (2026-09-29, a doua rundă)
+
+Două documente indexate: `graul-incoltit-valeriu-popa` (19 chunk-uri, 3.409 tokeni) și
+`orele-de-refacere-ale-organelor` (7.836 tokeni). Întrebări „cum întreabă omul”, `--no-expand`,
+locul chunk-ului corect:
+
+| Întrebare | multi-vector, promptul vechi | + BM25 vechi | multi-vector, promptul nou | + BM25 nou |
+|---|---|---|---|---|
+| ce recomanzi pentru sistemul nervos? | #2 | lipsă din top 5 | **#1** | #2 |
+| am colesterolul mare, ce pot face? | #1 | #1 | #1 | #1 |
+| ce să mănânc pentru constipație? | #1 | lipsă din top 5 | #1 | **#1** |
+| cine nu are voie să mănânce grâu încolțit? | #1 | #5 | #1 | **#1** |
+| sunt mereu obosit, ce pot face? | — | — | #1 | #1 |
+| îmi cade părul | — | — | #1 | #1 |
+
+- **Promptul întrebărilor** (`questions.py`) cere acum, în ordine: 1-2 întrebări pornind de la
+  problemă, fără să numească remediul („Ce pot face pentru colesterolul mare?”), una de
+  ansamblu cu subiectul numit și 0-2 de detaliu, fără variante ale aceleiași idei (vârste, doze).
+  Motivul: omul nu știe ce e în corpus și întreabă de la problema lui. Promptul vechi cerea
+  întrebări la care fragmentul „răspunde complet”, deci doar întrebări înguste, pornind de la remediu.
+- **Cu extindere** (implicit), „am colesterolul mare” întoarce pe #1 tot documentul cu grâul
+  (`document`, 10/19 chunk-uri găsite), apoi secțiuni din „Orele de refacere” (peste prag).
+- Corpusul are doar 2 documente: măsurătorile sunt orientative până la un set de evaluare pe un
+  corpus mai mare.
+
 ### Cum se reglează
 
 | Vrei să… | Modifici |
 |---|---|
-| câte chunk-uri implicit | `DEFAULT_K` (`retrieval.py`) |
+| câte rezultate implicit | `DEFAULT_K` (`retrieval.py`) |
+| cât de mare poate fi un părinte | `PARENT_MAX_TOKENS` (`parents.py`) |
+| câți vecini are un chunk dintr-o secțiune prea mare | `NEIGHBORS` (`parents.py`) |
 | câți copii candidați per chunk cerut | `CHILDREN_PER_CHUNK` (`retrieval.py`; legat de `MAX_QUESTIONS` din `questions.py`) |
 | cât de repede scade greutatea unui rang mai slab la RRF | `RRF_K` (`retrieval.py`) |
 | tokenizarea BM25 (stemming, stopwords) | `tokenize` (`lexical.py`) |
+
+## Evaluarea (`evaluation.py`, comanda `evaluate`)
+
+### Ce face
+
+Trece fiecare întrebare de test prin cele patru moduri ale lui `build_retriever`
+(`baseline`, `baseline+bm25`, `multi-vector`, `multi-vector+bm25`), cu `k=10` și **fără
+extindere la părinți**. Părinții (document/secțiune) ar conține aproape orice cuvânt-cheie și ar
+umfla metricile. Afișează media pe toate întrebările, apoi pe fiecare categorie (`direct_fact`,
+`reasoning` etc.). Cu `--details` afișează și MRR-ul fiecărei întrebări, iar cu `--save` scrie
+mediile în `eval_results/`.
+
+Pentru analiză, `notebooks/05_evaluation.ipynb` face aceeași evaluare, dar păstrează rezultatele în
+memorie. Arată întrebările unde două moduri diferă, pe cele ratate în toate modurile și, pentru o
+întrebare, top 10 din fiecare mod plus chunk-urile din DB care conțin cuvintele-cheie. Așa se vede
+dacă a greșit retrieval-ul sau cuvântul-cheie. Secțiunea 7 compară ultimele două instantanee salvate.
+
+- **Setul de test:** implicit `rag_simple/evaluation/tests.jsonl`, în formatul `TestQuestion`
+  (`question`, `keywords`, `reference_answer`, `category`); alt fișier se dă cu `--tests`. Setul
+  dedicat noului corpus vine din faza separată de extragere a întrebărilor (decizia 10 din spec)
+  și va folosi același format.
+- **Relevanța** e aproximată ca în `rag_simple`: un chunk e relevant pentru un cuvânt-cheie dacă
+  îl conține (subșir). Metricile (MRR, nDCG@10, recall/precision@5/@10, hit rate@10) au aceleași
+  definiții ca în `rag_simple/evaluation/retrieval_metrics.py`.
+
+### De ce arată așa
+
+- **Metricile sunt copiate, nu importate.** Importul lui `retrieval_metrics.py` trage după el
+  `rag_simple.retrieval.pipeline`, care la import creează modelele de chat și citește
+  `chunks.json`. Asta durează ~10 s și cere cheile API chiar și în teste. `rag_simple` rămâne
+  neatins (decizia 11), deci definițiile sunt copiate în `question_metrics`.
+- **Potrivirea ignoră diacriticele și spațiile multiple** (`fold`), spre deosebire de
+  `rag_simple`. Cuvintele-cheie au fost scrise pe textele vechi, adesea fără diacritice („2-5
+  saptamani”, „grãsimi”), iar markdown-ul restructurat le are.
+- **Întrebările fără răspuns în corpus se sar** (`split_answerable`): o întrebare e sărită dacă
+  niciun cuvânt-cheie de-al ei nu apare în niciun chunk din DB, adică documentul ei nu e indexat.
+  Altfel ar da 0 în toate modurile și ar tasa diferențele. Opțiunea `--all` le include.
+
+### Rezultate reale (2026-09-30)
+
+Rulat pe `tests.jsonl` (43 de întrebări, dintre care 36 evaluate și 7 sărite), cu chunk-urile din
+DB de la acea dată: `graul-incoltit` (19 chunk-uri, 62 de întrebări), `orele-de-refacere` (36,
+142) și `seminar-macrobiotica` (74, 251; e `reviewed`, dar are chunk-urile de la o indexare
+anterioară).
+
+| mod | MRR | nDCG | recall@5 | recall@10 | hit@10 |
+|---|---|---|---|---|---|
+| baseline | 0.713 | 0.719 | 0.756 | 0.804 | 0.861 |
+| baseline+bm25 | 0.744 | 0.756 | 0.831 | 0.852 | 0.917 |
+| multi-vector | 0.734 | 0.736 | 0.784 | 0.798 | 0.861 |
+| multi-vector+bm25 | 0.726 | 0.735 | 0.800 | 0.824 | 0.889 |
+
+Ce se vede:
+
+- **BM25 ajută peste baseline** (+0.03 MRR, +0.075 recall@5), mai ales la `reasoning` (MRR
+  0.71 → 0.91). **Multi-vector ajută puțin singur** (+0.02 MRR), dar **combinat cu BM25 nu
+  depășește `baseline+bm25`**.
+- Multi-vector câștigă clar la întrebările despre ore („21:00-23:00”, „trezirea între 23 și 1”:
+  MRR 0.17-0.62 → 1.00). Pierde la „Spune-mi despre grâul încolțit” și la „carențe minerale”
+  (1.00 → 0.33): întrebările generate trag chunk-uri de detaliu înaintea celui de ansamblu.
+- BM25 strică la enumerări lungi din seminar („organele cerealelor”, „5 dificultăți”: 1.00 →
+  0.50-0.69), unde cuvintele comune ridică alte chunk-uri.
+- Ratate în toate modurile: întrebările „după Ohsawa” (cartea lui Ohsawa nu e indexată, dar nu
+  sunt sărite, pentru că termeni ca „diabetul” apar în seminar) și cele scrise ca un utilizator
+  („Ce recomanzi pentru sistemul nervos”, „Ce să mănânc pentru constipație?”). Pe acestea
+  multi-vector ar trebui să le ajute, dar cuvântul-cheie „grâu încolțit” nu apare în chunk-urile
+  despre efecte, care spun doar „grâul” sau „germenii”. E o limită a aproximării prin
+  cuvinte-cheie.
+- **Concluzie provizorie:** diferențele sunt de ordinul 1-2 întrebări din 36. Nu se poate alege
+  între moduri până la setul de test dedicat, pe mai multe documente.
+
+### Limitări
+
+- Relevanța prin subșir favorizează chunk-urile lungi și penalizează parafrazele. Un chunk
+  corect care spune „germenii” în loc de „grâu încolțit” contează ca irelevant.
+- `split_answerable` e grosier: o întrebare se evaluează dacă *oricare* cuvânt-cheie apare
+  oriunde, chiar dacă documentul ei țintă lipsește.
+- Fiecare mod face propriul embedding al întrebării, deci 4 × N apeluri OpenAI (ieftine, câteva
+  zeci de secunde).
+
+## Comparația vizuală (`explorer.py`)
+
+`evaluate` dă cifrele; `explorer` arată *de ce* ies așa. Aceeași întrebare merge la două
+panouri (A | B), fiecare cu metoda lui: `rag_simple` (rescriere + semantic + BM25 + rerank, peste
+`rag_simple_chunks`) sau unul din cele 4 moduri din `evaluation.MODES`, cu chunk-uri sau cu
+părinți. Fiecare rezultat e marcat față de celălalt panou: ★ același chunk (doar între moduri
+`knowledge_prep`, chunking-ul `rag_simple` e altul), ◆ același document (cheia comună e numele
+fișierului markdown), ○ doar aici.
+
+- **Acoperirea** (accordion-ul de jos) pune alături documentele fiecărei metode: chunk-urile din
+  `rag_simple_chunks` și stadiul + chunk-urile din registru. **Compară metodele doar pe
+  documentele pe care le au amândouă**; altfel diferența vine din corpus, nu din metodă.
+- `rag_simple` se importă leneș (modelele și BM25-ul lui durează câteva secunde) și costă un
+  apel de rescriere + un rerank per întrebare; modurile `knowledge_prep` costă un embedding.
+- Prima rulare a unei metode e secvențială: importurile leneșe din `openai` rulate în paralel pe
+  două fire dau `_DeadlockError`. După ce fiecare metodă a mers o dată, panourile rulează în
+  paralel.
+- Dacă portul 7860 e ocupat (ex. de `rag_simple/gradio_app.py`), Gradio alege 7861.
 
 ## Testare
 
@@ -453,13 +629,17 @@ diacritice merge.
 - Verificarea reală se face manual, pe un document mic, fără să atingi corpusul: cheamă
   `restructure(corp, titlu)` din Python și scrie rezultatul într-un folder temporar.
 - **Indexarea se testează la fel, cu fake-uri proprii** (`tests/index_fakes.py`):
-  `FakeVectors` (embeddings deterministe după lungimea textului, `replace_document` în
-  memorie, cu `fail="embed"` / `fail="write"` ca să simuleze un eșec la fiecare pas) și
+  `FakeVectors` (embeddings deterministe după lungimea textului, `delete_chunks`/`add` în
+  memorie, cu `fail="embed"` / `fail="write"` ca să simuleze un eșec la fiecare pas;
+  `writes_ok=N` lasă primele N loturi să treacă, pentru testele de reluare) și
   `FakeQuestions` (întrebări deterministe, înregistrează apelurile primite). `index_document(...)`
   primește `vectors=` și `questioner=` direct; `__main__.main(...)` primește și el `vectors=`
   și `questioner=` (implicit `PgVectorIndex.from_settings()`, respectiv `generate_questions`
   din `questions.py`) — dă-le fake în teste, la fel cum `converters=`/`restructurer=` se dau
   fake pentru `prepare`. Helper-ul `run()` din `test_cli.py` face deja asta pentru `index`.
+- **Evaluarea** (`test_evaluation.py`) folosește retriever-e fixe (`FixedRetriever`), fără DB;
+  testele CLI pentru `evaluate` (`test_cli.py`) rulează toate modurile pe `FakeChildStore` și un
+  `tests.jsonl` temporar.
 - `test_vectors_pg.py` e integrare reală pe Postgres cu pgvector (ștergerea și refacerea
   vectorilor unui document, filtrarea după `kind`): se sare automat dacă `.env` nu are o
   bază care răspunde (`docker compose up -d db`), altfel creează un tabel propriu

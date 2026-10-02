@@ -55,7 +55,9 @@ def test_multi_vector_dedupes_children_and_asks_for_more_children_than_k(
             child(c3, "content"),
         ]
     )
-    retriever = build_retriever(store, session.get_bind(), k=2, hybrid=False)
+    retriever = build_retriever(
+        store, session.get_bind(), k=2, hybrid=False, expand=False
+    )
 
     assert ids(retriever.invoke("orice")) == [str(c2.id), str(c1.id)]
     assert store.calls == [
@@ -74,7 +76,7 @@ def test_baseline_searches_only_content_vectors(session: Session, chunks: list[C
         ]
     )
     retriever = build_retriever(
-        store, session.get_bind(), k=5, questions=False, hybrid=False
+        store, session.get_bind(), k=5, questions=False, hybrid=False, expand=False
     )
 
     assert ids(retriever.invoke("orice")) == [str(c3.id), str(c2.id)]
@@ -88,7 +90,7 @@ def test_many_questions_of_one_chunk_do_not_crowd_out_the_others(
     children = [child(c1, "question") for _ in range(5)]
     children += [child(c1, "content"), child(c2, "content")]
     retriever = build_retriever(
-        FakeChildStore(children), session.get_bind(), k=2, hybrid=False
+        FakeChildStore(children), session.get_bind(), k=2, hybrid=False, expand=False
     )
     assert ids(retriever.invoke("orice")) == [str(c1.id), str(c2.id)]
 
@@ -103,11 +105,15 @@ def test_hybrid_adds_bm25_hits_by_rrf_on_chunk_id(
     bind = session.get_bind()
 
     # semantic [c2, c1, c3] + BM25 [c4] → RRF: c2 (1/61, primul la egalitate), c4 (1/61), ...
-    assert ids(build_retriever(store, bind, k=2).invoke("zxqvortex")) == [
+    assert ids(build_retriever(store, bind, k=2, expand=False).invoke("zxqvortex")) == [
         str(c2.id),
         str(c4.id),
     ]
-    assert ids(build_retriever(store, bind, k=2, hybrid=False).invoke("zxqvortex")) == [
+    assert ids(
+        build_retriever(store, bind, k=2, hybrid=False, expand=False).invoke(
+            "zxqvortex"
+        )
+    ) == [
         str(c2.id),
         str(c1.id),
     ]
@@ -118,7 +124,9 @@ def test_chunks_missing_from_db_are_skipped(session: Session, chunks: list[Chunk
     store = FakeChildStore(
         [child(c1, "content"), child(c2, "content"), child(c3, "content")]
     )
-    retriever = build_retriever(store, session.get_bind(), k=2)  # BM25 îl conține pe c4
+    retriever = build_retriever(
+        store, session.get_bind(), k=2, expand=False
+    )  # BM25 îl conține pe c4
     session.delete(c1)  # vector orfan
     session.delete(c4)  # dispărut din BM25 după construire
     session.commit()

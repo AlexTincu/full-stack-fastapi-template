@@ -17,14 +17,14 @@ CHAT_MODEL = "openai:gpt-4.1-mini"
 EMBEDDING_MODEL = "openai:text-embedding-3-large"
 EMBEDDING_DIMENSIONS = 3072  # must match EMBEDDING_MODEL's output size
 
+# Default folder for `ingest`; files stay in place, `DOCUMENTS_TABLE_NAME` records what's ingested.
 KNOWLEDGE_DIR = settings.KNOWLEDGE_DIR
-# Files are moved here after a successful ingest, so each run only picks up new ones.
-INGESTED_DIR = KNOWLEDGE_DIR.parent / "ingested"
 DB_DIR = ROOT / "db"
 CHUNKS_PATH = DB_DIR / "chunks.json"
 
 PGVECTOR_CONNECTION = str(settings.DATABASE_URL)
 PGVECTOR_TABLE_NAME = "rag_simple_chunks"
+DOCUMENTS_TABLE_NAME = "rag_simple_documents"
 
-RETRIEVAL_K = 20
-FINAL_K = 20
+RETRIEVAL_K = 10
+FINAL_K = 10

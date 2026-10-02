@@ -124,7 +124,7 @@ def test_unsplit_document_is_one_chunk_with_whole_document_questions(
     assert questioner.calls[0][3] is True
 
 
-def test_reindex_replaces_old_rows_and_vectors_only_for_that_document(
+def test_reindex_after_edit_redoes_only_changed_chunks(
     session: Session, tmp_path: Path
 ):
     doc = make_doc(session, tmp_path)
@@ -132,20 +132,152 @@ def test_reindex_replaces_old_rows_and_vectors_only_for_that_document(
     vectors = FakeVectors()
     index_document(session, other, vectors=vectors, questioner=FakeQuestions())
     index_document(session, doc, vectors=vectors, questioner=FakeQuestions())
+    before = chunks_of(session, doc)
     old_ids = {e.id for e in vectors.of(doc.id)}
     other_ids = {e.id for e in vectors.of(other.id)}
+    # o întrebare editată manual pe un chunk neschimbat rămâne
+    q = questions_of(session, doc)[0]
+    q.text = "Întrebare editată?"
+    session.add(q)
+    session.commit()
 
-    edit_and_review(session, doc, f"\n## Mod de folosire\n\n{MID}\n")
-    report = index_document(session, doc, vectors=vectors, questioner=FakeQuestions())
+    md = Path(doc.markdown_path)
+    md.write_text(
+        md.read_text(encoding="utf-8").replace(
+            "## Contraindicații", "## Contraindicații la copii"
+        )
+        + f"\n## Mod de folosire\n\n{MID}\n",
+        encoding="utf-8",
+    )
+    registry.review(session, doc)
+    questioner = FakeQuestions()
+    report = index_document(session, doc, vectors=vectors, questioner=questioner)
 
-    assert len(chunks_of(session, doc)) == 3
+    after = chunks_of(session, doc)
+    assert after[0].id == before[0].id  # Beneficii: neschimbat, păstrat
+    assert after[1].id != before[1].id  # Contraindicații: titlu schimbat, refăcut
+    assert [c.heading_path[-1] for c in after] == [
+        "Beneficii",
+        "Contraindicații la copii",
+        "Mod de folosire",
+    ]
+    assert [c[1][-1] for c in questioner.calls] == [
+        "Contraindicații la copii",
+        "Mod de folosire",
+    ]
+    assert "Întrebare editată?" in {q.text for q in questions_of(session, doc)}
     assert len(questions_of(session, doc)) == 6
     assert len(session.exec(select(Question)).all()) == 6 + 2
     assert len(session.exec(select(Chunk)).all()) == 3 + 1
     new_ids = {e.id for e in vectors.of(doc.id)}
-    assert not (old_ids & new_ids) and len(new_ids) == 3 + 6
+    assert len(new_ids) == 3 + 6 and len(old_ids & new_ids) == 1 + 2
     assert {e.id for e in vectors.of(other.id)} == other_ids
-    assert any("se înlocuiesc 4 întrebări" in w for w in report.warnings)
+    assert (report.chunks, report.reused, report.questions) == (3, 1, 6)
+    assert any("se înlocuiesc 2 întrebări" in w for w in report.warnings)
+    assert all(c.indexed_at is not None for c in after)
+    assert doc.stage == Stage.indexed
+
+
+def test_rerun_on_complete_index_only_marks_indexed(session: Session, tmp_path: Path):
+    """Cazul unei rulări întrerupte după scrierea ultimului lot: nimic de refăcut."""
+    doc = make_doc(session, tmp_path)
+    vectors = FakeVectors()
+    index_document(session, doc, vectors=vectors, questioner=FakeQuestions())
+    ids = {c.id for c in chunks_of(session, doc)}
+    doc.stage, doc.indexed_hash = Stage.reviewed, None
+    session.add(doc)
+    session.commit()
+
+    questioner = FakeQuestions()
+    vectors.embedded.clear()
+    report = index_document(session, doc, vectors=vectors, questioner=questioner)
+
+    assert questioner.calls == [] and vectors.embedded == []
+    assert {c.id for c in chunks_of(session, doc)} == ids
+    assert (report.chunks, report.reused, report.questions) == (2, 2, 4)
+    assert (doc.stage, doc.indexed_hash) == (Stage.indexed, doc.reviewed_hash)
+
+
+def test_force_redoes_every_chunk(session: Session, tmp_path: Path):
+    doc = make_doc(session, tmp_path)
+    vectors = FakeVectors()
+    index_document(session, doc, vectors=vectors, questioner=FakeQuestions())
+    old = {c.id for c in chunks_of(session, doc)}
+
+    questioner = FakeQuestions()
+    report = index_document(
+        session, doc, vectors=vectors, questioner=questioner, force=True
+    )
+    assert len(questioner.calls) == 2 and report.reused == 0
+    assert not old & {c.id for c in chunks_of(session, doc)}
+    assert len(vectors.of(doc.id)) == 2 + 4
+
+
+def test_switching_questions_mode_redoes_chunks(session: Session, tmp_path: Path):
+    doc = make_doc(session, tmp_path)
+    vectors = FakeVectors()
+    index_document(session, doc, vectors=vectors, questioner=FakeQuestions())
+
+    report = index_document(session, doc, vectors=vectors, questioner=None)
+    assert report.reused == 0 and questions_of(session, doc) == []
+    assert {e.kind for e in vectors.of(doc.id)} == {"content"}
+
+    questioner = FakeQuestions()
+    report = index_document(session, doc, vectors=vectors, questioner=questioner)
+    assert report.reused == 0 and len(questioner.calls) == 2
+    assert len(vectors.of(doc.id, "question")) == 4
+
+
+def test_failure_in_second_batch_keeps_first_and_rerun_resumes(
+    session: Session, tmp_path: Path
+):
+    doc = make_doc(session, tmp_path)
+    vectors = FakeVectors(fail="write", writes_ok=1)
+    with pytest.raises(RuntimeError):
+        index_document(
+            session, doc, vectors=vectors, questioner=FakeQuestions(), batch_size=1
+        )
+    assert (doc.stage, doc.last_error) == (
+        Stage.reviewed,
+        "RuntimeError: pgvector căzut",
+    )
+    [done, pending] = chunks_of(session, doc)
+    assert done.indexed_at is not None and pending.indexed_at is None
+    assert {e.doc_id for e in vectors.of(doc.id)} == {done.id}
+
+    vectors.fail = None
+    questioner = FakeQuestions()
+    report = index_document(
+        session, doc, vectors=vectors, questioner=questioner, batch_size=1
+    )
+    assert [c[1][-1] for c in questioner.calls] == ["Contraindicații"]
+    after = chunks_of(session, doc)
+    assert after[0].id == done.id and after[1].id != pending.id
+    assert (report.chunks, report.reused, report.questions) == (2, 1, 4)
+    assert len(vectors.of(doc.id)) == 2 + 4
+    assert (doc.stage, doc.last_error) == (Stage.indexed, None)
+
+
+def test_interrupt_is_recorded_and_keeps_finished_batches(
+    session: Session, tmp_path: Path
+):
+    doc = make_doc(session, tmp_path)
+    calls = FakeQuestions()
+
+    def interrupted(title: str, path: list[str], text: str, whole: bool) -> list[str]:
+        if calls.calls:
+            raise KeyboardInterrupt
+        return calls(title, path, text, whole)
+
+    with pytest.raises(KeyboardInterrupt):
+        index_document(
+            session, doc, vectors=FakeVectors(), questioner=interrupted, batch_size=1
+        )
+    assert (doc.stage, doc.last_error) == (
+        Stage.reviewed,
+        "KeyboardInterrupt: întrerupt",
+    )
+    assert [c.indexed_at is not None for c in chunks_of(session, doc)] == [True]
 
 
 def test_index_requires_reviewed_and_unchanged_markdown(

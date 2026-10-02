@@ -48,11 +48,10 @@ class VectorEntry:
 class VectorIndex(Protocol):
     def embed(self, texts: list[str]) -> list[list[float]]: ...
 
-    def replace_document(
-        self,
-        document_id: uuid.UUID,
-        entries: Sequence[VectorEntry],
-        embeddings: Sequence[list[float]],
+    def delete_chunks(self, chunk_ids: Sequence[uuid.UUID]) -> None: ...
+
+    def add(
+        self, entries: Sequence[VectorEntry], embeddings: Sequence[list[float]]
     ) -> None: ...
 
 
@@ -119,14 +118,14 @@ class PgVectorIndex:
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self._embeddings.embed_documents(texts) if texts else []
 
-    def replace_document(
-        self,
-        document_id: uuid.UUID,
-        entries: Sequence[VectorEntry],
-        embeddings: Sequence[list[float]],
+    def delete_chunks(self, chunk_ids: Sequence[uuid.UUID]) -> None:
+        """Șterge vectorii-copii ai chunk-urilor (după `doc_id`, deci și resturi de la o rulare întreruptă)."""
+        if chunk_ids:
+            self.store.delete(filter={"doc_id": {"$in": [str(c) for c in chunk_ids]}})
+
+    def add(
+        self, entries: Sequence[VectorEntry], embeddings: Sequence[list[float]]
     ) -> None:
-        """Șterge toți vectorii documentului (după `document_id`, deci și resturi de la o rulare întreruptă), apoi îi adaugă pe cei noi."""
-        self.store.delete(filter={"document_id": str(document_id)})
         if not entries:
             return
         self.store.add_embeddings(

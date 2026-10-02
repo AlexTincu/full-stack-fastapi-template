@@ -2,7 +2,7 @@ from functools import lru_cache
 
 from langchain.embeddings import init_embeddings
 from langchain_postgres import PGEngine, PGVectorStore
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import Engine, create_engine, inspect
 
 from app.rag_simple.config import (
     EMBEDDING_DIMENSIONS,
@@ -15,6 +15,12 @@ from app.rag_simple.config import (
 @lru_cache
 def get_engine() -> PGEngine:
     return PGEngine.from_connection_string(url=PGVECTOR_CONNECTION)
+
+
+@lru_cache
+def get_sql_engine() -> Engine:
+    """Plain (sync) SQLAlchemy engine on the same database, for the documents table."""
+    return create_engine(PGVECTOR_CONNECTION, pool_pre_ping=True)
 
 
 @lru_cache

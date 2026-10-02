@@ -21,7 +21,7 @@ Bind = Engine | Connection
 _READ_ONLY = "ChunkDocStore e doar pentru citire: chunk-urile se scriu prin `index`."
 
 
-def _as_uuid(key: object) -> uuid.UUID | None:
+def as_uuid(key: object) -> uuid.UUID | None:
     # PGVectorStore întoarce `doc_id` ca uuid.UUID, restul lumii ca str
     if isinstance(key, uuid.UUID):
         return key
@@ -51,7 +51,7 @@ class ChunkDocStore(BaseStore[str, Document]):
 
     def mget(self, keys: Sequence[str]) -> list[Document | None]:
         """Chunk-urile cerute, în ordinea cheilor; `None` pentru o cheie inexistentă sau invalidă."""
-        wanted = [_as_uuid(k) for k in keys]
+        wanted = [as_uuid(k) for k in keys]
         ids = {u for u in wanted if u is not None}
         if not ids:
             return [None] * len(keys)
